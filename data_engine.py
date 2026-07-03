@@ -10,6 +10,8 @@ import numpy as np
 from datetime import datetime, timedelta
 import logging
 import os
+import contextlib
+import io
 import urllib.request
 import re
 
@@ -22,8 +24,14 @@ HIST_CACHE_DIR = "cache/hist"
 _hist_cache: dict[str, pd.DataFrame] = {}
 
 
+def _bs_login():
+    """静默登录 baostock，抑制 'login success!' 输出。"""
+    with contextlib.redirect_stdout(io.StringIO()):
+        bs.login()
+
+
 def login():
-    bs.login()
+    _bs_login()
 
 
 def logout():
@@ -77,6 +85,7 @@ def get_all_stock_codes() -> list[str]:
     包含：沪市主板/科创板(sh.6xxxxx)、深市主板/中小板(sz.0xxxxx)、创业板(sz.3xxxxx)
     自动处理节假日：往前最多回溯7天查找有效交易日。
     """
+    _bs_login()  # 确保连接活跃（baostock 支持重复登录）
     for delta in range(7):
         day = (datetime.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
         rs = bs.query_all_stock(day=day)
@@ -140,18 +149,22 @@ def get_stock_history(code: str, days: int = 60) -> pd.DataFrame:
 def refresh_hist_cache(codes: list[str], on_progress=None) -> tuple[int, int]:
     """
     批量下载并覆盖保存股票历史K线到本地磁盘。
-    
+
     Args:
         codes: 需要缓存的股票代码列表
         on_progress: 进度回调 (current_code: str, done: int, total: int)
-    
+
     Returns:
         (成功数量, 失败数量)
     """
     os.makedirs(HIST_CACHE_DIR, exist_ok=True)
+    _bs_login()  # 确保连接在批量开始前是活跃的
     success, errors = 0, 0
     total = len(codes)
     for i, code in enumerate(codes, 1):
+        # 每200只重新登录一次，防止长时间运行时连接超时断开
+        if i % 200 == 0:
+            _bs_login()
         try:
             df = _fetch_history_from_api(code, days=60)
             if not df.empty:
