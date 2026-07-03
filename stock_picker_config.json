@@ -1,0 +1,108 @@
+{
+  "filters": {
+    "turnover": {
+      "min": 2.0,
+      "max": 50.0,
+      "enabled": true,
+      "description": "换手率 (%) - 衡量股票的活跃度和流动性。高换手表示买卖活跃，低换手可能流动性差"
+    },
+    "amplitude": {
+      "min": 2.0,
+      "max": 20.0,
+      "enabled": true,
+      "description": "振幅 (%) - 计算公式：(最高价-最低价)/开盘价*100。反映股票的波动幅度，>2%表示有明显波动"
+    },
+    "pct_change": {
+      "min": -5.0,
+      "max": 15.0,
+      "enabled": true,
+      "description": "单日涨跌幅 (%) - 相对于前一日收盘价的涨跌百分比。用于筛选涨幅合理的股票"
+    },
+    "price_range": {
+      "min": 5,
+      "max": 500,
+      "enabled": true,
+      "description": "股票价格范围 (¥) - 过低的股票容易被操纵，过高的股票流动性差。建议5-500元"
+    },
+    "volume_rate": {
+      "enabled": false,
+      "min_vs_avg": 1.5,
+      "days": 5,
+      "description": "成交量突增 - 今日成交量是过去5日平均的1.5倍以上，表示出现放量。放量往往伴随趋势转变"
+    },
+    "rsi": {
+      "enabled": false,
+      "min": 20,
+      "max": 80,
+      "description": "RSI相对强弱指数 (0-100) - 衡量买卖力道。<30超卖，>70超买。中性区间20-80"
+    },
+    "rsi_oversold": {
+      "enabled": false,
+      "threshold": 30,
+      "description": "RSI超卖信号 - RSI<30表示股票超卖，可能面临反弹。超卖通常是买入机会"
+    },
+    "rsi_overbought": {
+      "enabled": false,
+      "threshold": 70,
+      "description": "RSI超买信号 - RSI>70表示股票超买，可能面临回调。超买通常是卖出或减仓信号"
+    },
+    "macd_golden_cross": {
+      "enabled": false,
+      "description": "MACD金叉信号 - DIF线上穿DEA线，是经典的多头信号。往往伴随价格上涨"
+    },
+    "macd_death_cross": {
+      "enabled": false,
+      "description": "MACD死叉信号 - DIF线下穿DEA线，是经典的空头信号。往往伴随价格下跌"
+    },
+    "kdj": {
+      "enabled": false,
+      "min": 10,
+      "max": 90,
+      "description": "KDJ随机指标K值范围 - <30为低位(超卖区)，>70为高位(超买区)。中性30-70"
+    },
+    "kdj_low_cross": {
+      "enabled": false,
+      "threshold": 30,
+      "description": "KDJ低位金叉 - K值<30且K线上穿D线。表示由弱转强，是低位反弹的信号"
+    },
+    "bb_position": {
+      "enabled": false,
+      "position": "lower",
+      "description": "布林带位置判断 - lower(下轨附近，反弹机会)、middle(中线)、upper(上轨附近，回调风险)"
+    },
+    "ma_trend": {
+      "enabled": false,
+      "type": "bullish",
+      "description": "均线趋势判断 - bullish(多头：价格>MA20>MA60)、bearish(空头：价格<MA20<MA60)"
+    },
+    "price_vs_ma20": {
+      "enabled": false,
+      "relation": "above",
+      "pct": 2.0,
+      "description": "价格vs短期均线(20日) - above(价格在MA20上方2%)表示短期走强；below表示短期走弱"
+    },
+    "price_vs_ma60": {
+      "enabled": false,
+      "relation": "above",
+      "pct": 5.0,
+      "description": "价格vs长期均线(60日) - above(价格在MA60上方5%)表示中期走强；below表示中期走弱"
+    },
+    "atr_ratio": {
+      "enabled": false,
+      "min": 0.5,
+      "description": "ATR波动性指标 - ATR14与收盘价的百分比。>0.5%表示波动性较大，适合短期交易"
+    },
+    "high_low_ratio": {
+      "enabled": false,
+      "min": 0.8,
+      "description": "最低价/最高价比值 - >0.8表示低点明显高于高点，说明有强势反弹，具有反弹潜力"
+    }
+  },
+  "signal_weights": {
+    "macd_golden": 2.0,
+    "rsi_oversold": 1.5,
+    "kdj_cross": 1.2,
+    "volume": 0.8
+  },
+  "max_results": 20
+}
