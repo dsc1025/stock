@@ -1,0 +1,29 @@
+{
+  "name": "高弹性反弹型 — 高波动股超跌后、RSI拐点、技术修复",
+  "filters": {
+    "turnover": {"min": 3.0, "max": 40.0, "enabled": true},
+    "amplitude": {"min": 4.0, "max": 20.0, "enabled": true},
+    "pct_change": {"min": -5.0, "max": 3.0, "enabled": true},
+    "price_range": {"min": 5, "max": 200, "enabled": true},
+    "volume_rate": {"enabled": true, "min_vs_avg": 1.2, "days": 5},
+    "rsi": {"enabled": true, "min": 25, "max": 45},
+    "rsi_oversold": {"enabled": false, "threshold": 30},
+    "rsi_overbought": {"enabled": false, "threshold": 70},
+    "macd_golden_cross": {"enabled": false},
+    "macd_death_cross": {"enabled": false},
+    "kdj": {"enabled": true, "min": 10, "max": 40},
+    "kdj_low_cross": {"enabled": false, "threshold": 30},
+    "bb_position": {"enabled": true, "position": "lower"},
+    "ma_trend": {"enabled": false, "type": "bullish"},
+    "price_vs_ma20": {"enabled": false, "relation": "below", "pct": 3.0},
+    "price_vs_ma60": {"enabled": false, "relation": "below", "pct": 8.0},
+    "atr_ratio": {"enabled": true, "min": 2.0},
+    "high_low_ratio": {"enabled": false, "min": 0.8}
+  },
+  "signal_weights": {
+    "macd_golden": 1.5,
+    "rsi_oversold": 2.0,
+    "kdj_cross": 1.5,
+    "volume": 1.0
+  }
+}

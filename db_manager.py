@@ -20,11 +20,23 @@ CREATE TABLE IF NOT EXISTS stock_history (
     amount DECIMAL(18,2),
     turn DECIMAL(8,4),
     pctChg DECIMAL(8,4),
+    MA5 DECIMAL(10,2),
+    MA10 DECIMAL(10,2),
+    MA20 DECIMAL(10,2),
+    MA60 DECIMAL(10,2),
+    DIF DECIMAL(10,6),
+    DEA DECIMAL(10,6),
+    MACD DECIMAL(10,6),
+    RSI14 DECIMAL(8,4),
+    BB_UP DECIMAL(10,2),
+    BB_MID DECIMAL(10,2),
+    BB_LO DECIMAL(10,2),
+    K DECIMAL(8,4),
+    D DECIMAL(8,4),
+    ATR14 DECIMAL(10,4),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_code_date (code, date),
-    INDEX idx_code (code),
-    INDEX idx_date (date)
+    UNIQUE KEY uk_code_date (code, date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS portfolio (
@@ -60,52 +72,94 @@ CREATE TABLE IF NOT EXISTS configs (
 
 
 def init_database():
-    """Create all tables if they don't exist."""
+    """Create all tables, migrate schema, and clean up redundant indexes."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             for stmt in _CREATE_TABLES.split(";"):
                 stmt = stmt.strip()
                 if stmt:
                     cur.execute(stmt)
+            # Migrate: add indicator columns to existing tables
+            _INDICATOR_COLS = [
+                "MA5 DECIMAL(10,2)", "MA10 DECIMAL(10,2)", "MA20 DECIMAL(10,2)",
+                "MA60 DECIMAL(10,2)", "DIF DECIMAL(10,6)", "DEA DECIMAL(10,6)",
+                "MACD DECIMAL(10,6)", "RSI14 DECIMAL(8,4)",
+                "BB_UP DECIMAL(10,2)", "BB_MID DECIMAL(10,2)", "BB_LO DECIMAL(10,2)",
+                "K DECIMAL(8,4)", "D DECIMAL(8,4)", "ATR14 DECIMAL(10,4)",
+            ]
+            for col_def in _INDICATOR_COLS:
+                try:
+                    cur.execute(f"ALTER TABLE stock_history ADD COLUMN {col_def}")
+                except Exception:
+                    pass
+            # Drop redundant indexes
+            for drop_idx in [
+                "DROP INDEX idx_code ON stock_history",
+                "DROP INDEX idx_date ON stock_history",
+            ]:
+                try:
+                    cur.execute(drop_idx)
+                except Exception:
+                    pass
 
 
 # ── Stock History ───────────────────────────────────────────────────────
 
 def save_stock_history(code: str, df: pd.DataFrame):
-    """Upsert K-line data for one stock. Replaces all rows for that code."""
+    """Save K-line data with pre-computed indicators for one stock."""
     if df.empty:
         return
+
+    # Ensure indicators are computed
+    from data_engine import add_indicators
+    df = add_indicators(df)
+
+    _IND_COLS = [
+        "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD",
+        "RSI14", "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14",
+    ]
+
     with get_connection() as conn:
         with conn.cursor() as cur:
-            # Delete existing rows for this code, then bulk insert
             cur.execute("DELETE FROM stock_history WHERE code = %s", (code,))
-            sql = (
-                "INSERT INTO stock_history (code, date, open, high, low, close, volume, amount, turn, pctChg) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            )
+            cols = ["code", "date", "open", "high", "low", "close",
+                    "volume", "amount", "turn", "pctChg"] + _IND_COLS
+            placeholders = ",".join(["%s"] * len(cols))
+            sql = f"INSERT INTO stock_history ({','.join(cols)}) VALUES ({placeholders})"
+
             rows = []
             for _, r in df.iterrows():
-                rows.append((
-                    code,
-                    str(r["date"])[:10],
-                    float(r["open"]) if pd.notna(r["open"]) else None,
-                    float(r["high"]) if pd.notna(r["high"]) else None,
-                    float(r["low"]) if pd.notna(r["low"]) else None,
-                    float(r["close"]) if pd.notna(r["close"]) else None,
-                    int(r["volume"]) if pd.notna(r["volume"]) else None,
-                    float(r["amount"]) if pd.notna(r["amount"]) else None,
-                    float(r["turn"]) if pd.notna(r["turn"]) else None,
-                    float(r["pctChg"]) if pd.notna(r["pctChg"]) else None,
-                ))
+                row = [
+                    code, str(r["date"])[:10],
+                    _f(r, "open"), _f(r, "high"), _f(r, "low"), _f(r, "close"),
+                    _i(r, "volume"), _f(r, "amount"), _f(r, "turn"), _f(r, "pctChg"),
+                ]
+                for c in _IND_COLS:
+                    row.append(_f(r, c))
+                rows.append(row)
             cur.executemany(sql, rows)
 
 
+def _f(row, col, default=None):
+    """Safe float from pandas row."""
+    v = row.get(col)
+    return float(v) if pd.notna(v) else default
+
+
+def _i(row, col, default=None):
+    """Safe int from pandas row."""
+    v = row.get(col)
+    return int(v) if pd.notna(v) else default
+
+
 def load_stock_history(code: str) -> pd.DataFrame | None:
-    """Load K-line data for one stock. Returns None if not found."""
+    """Load K-line data with indicators for one stock."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT date, open, high, low, close, volume, amount, turn, pctChg "
+                "SELECT date, open, high, low, close, volume, amount, turn, pctChg, "
+                "MA5, MA10, MA20, MA60, DIF, DEA, MACD, RSI14, "
+                "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
                 "FROM stock_history WHERE code = %s ORDER BY date",
                 (code,),
             )
@@ -114,8 +168,12 @@ def load_stock_history(code: str) -> pd.DataFrame | None:
         return None
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
-    for col in ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg",
+                 "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD", "RSI14",
+                 "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14"]
+    for col in _NUM_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
@@ -125,6 +183,161 @@ def get_cached_stock_codes() -> list[str]:
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT code FROM stock_history ORDER BY code")
             return [r["code"] for r in cur.fetchall()]
+
+
+# ── Batch Operations (performance optimized) ────────────────────────────
+
+def prefilter_codes_by_latest(config_filters: dict) -> list[str] | None:
+    """Push simple filters (price, turnover, pct_change, amplitude) to SQL.
+
+    Only examines the latest trading day per stock via a subquery join.
+    Returns a list of codes that pass all enabled simple filters, or None
+    if no simple filters are enabled (meaning: caller should load all codes).
+    """
+    conditions = []
+    params = []
+
+    for key, cfg in config_filters.items():
+        if not cfg.get("enabled", False):
+            continue
+        if key == "turnover":
+            conditions.append("sh.turn BETWEEN %s AND %s")
+            params.extend([float(cfg["min"]), float(cfg.get("max", 100))])
+        elif key == "amplitude":
+            conditions.append("(sh.high - sh.low) / NULLIF(sh.open, 0) * 100 >= %s")
+            params.append(float(cfg["min"]))
+            if "max" in cfg:
+                conditions.append("(sh.high - sh.low) / NULLIF(sh.open, 0) * 100 <= %s")
+                params.append(float(cfg["max"]))
+        elif key == "pct_change":
+            conditions.append("sh.pctChg BETWEEN %s AND %s")
+            params.extend([float(cfg["min"]), float(cfg["max"])])
+        elif key == "price_range":
+            conditions.append("sh.close BETWEEN %s AND %s")
+            params.extend([float(cfg["min"]), float(cfg["max"])])
+
+    if not conditions:
+        return None  # no simple filters → caller loads all codes
+
+    sql = (
+        "SELECT sh.code FROM stock_history sh "
+        "INNER JOIN ("
+        "  SELECT code, MAX(date) AS max_date FROM stock_history GROUP BY code"
+        ") latest ON sh.code = latest.code AND sh.date = latest.max_date "
+        "WHERE " + " AND ".join(conditions) + " "
+        "ORDER BY sh.code"
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [r["code"] for r in cur.fetchall()]
+
+
+def load_stock_history_batch(codes: list[str], days: int = 120) -> dict[str, pd.DataFrame]:
+    """Load K-line data (with pre-computed indicators) for many stocks in ONE query."""
+    if not codes:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(codes))
+    sql = (
+        "SELECT code, date, open, high, low, close, volume, amount, turn, pctChg, "
+        "MA5, MA10, MA20, MA60, DIF, DEA, MACD, RSI14, "
+        "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
+        "FROM stock_history "
+        f"WHERE code IN ({placeholders}) "
+        "ORDER BY code, date"
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, codes)
+            rows = cur.fetchall()
+
+    if not rows:
+        return {}
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg",
+                 "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD", "RSI14",
+                 "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14"]
+    for col in _NUM_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    result = {}
+    for code, group in df.groupby("code"):
+        group = group.sort_values("date").tail(days).reset_index(drop=True)
+        result[code] = group
+
+    return result
+
+
+def load_latest_indicators_batch(codes: list[str]) -> dict[str, dict]:
+    """Load the LATEST TWO rows (with pre-computed indicators) for multiple stocks.
+
+    Returns dict[code] = {"last": {...}, "prev": {...}}
+    Uses MySQL window function ROW_NUMBER() for efficiency.
+    No pandas needed — returns plain dicts from the cursor.
+    """
+    if not codes:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(codes))
+    sql = (
+        "SELECT code, date, open, high, low, close, volume, amount, turn, pctChg, "
+        "MA5, MA10, MA20, MA60, DIF, DEA, MACD, RSI14, "
+        "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
+        "FROM ("
+        "  SELECT *, ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn "
+        "  FROM stock_history "
+        f" WHERE code IN ({placeholders})"
+        ") t WHERE rn <= 2 "
+        "ORDER BY code, date"
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, codes)
+            rows = cur.fetchall()
+
+    result: dict[str, dict] = {}
+    for r in rows:
+        code = r["code"]
+        if code not in result:
+            result[code] = {"last": None, "prev": None}
+        # rows are ordered by code, date — first row is prev, second is last
+        if result[code]["last"] is None:
+            # First encounter for this code = older row (prev)
+            result[code]["prev"] = r
+            result[code]["last"] = r  # will be overwritten by next row
+        else:
+            result[code]["prev"] = result[code]["last"]
+            result[code]["last"] = r
+
+    return result
+
+
+def get_avg_volume_batch(codes: list[str], days: int = 5) -> dict[str, float]:
+    """Get average volume of last N days for each code (used by volume_rate filter)."""
+    if not codes:
+        return {}
+    placeholders = ",".join(["%s"] * len(codes))
+    # Use window function to get last N rows per code efficiently
+    sql = (
+        "SELECT code, AVG(volume) AS avg_vol FROM ("
+        "  SELECT code, volume, "
+        "    ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn "
+        "  FROM stock_history "
+        f" WHERE code IN ({placeholders})"
+        f") t WHERE rn <= {days} "
+        "GROUP BY code"
+    )
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, codes)
+            return {r["code"]: float(r["avg_vol"] or 0) for r in cur.fetchall()}
 
 
 # ── Portfolio ───────────────────────────────────────────────────────────

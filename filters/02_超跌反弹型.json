@@ -1,0 +1,29 @@
+{
+  "name": "超跌反弹型 — 多重超卖信号共振、均值回归策略",
+  "filters": {
+    "turnover": {"min": 1.0, "max": 40.0, "enabled": true},
+    "amplitude": {"min": 2.0, "max": 15.0, "enabled": true},
+    "pct_change": {"min": -8.0, "max": 2.0, "enabled": true},
+    "price_range": {"min": 5, "max": 200, "enabled": true},
+    "volume_rate": {"enabled": false, "min_vs_avg": 1.2, "days": 5},
+    "rsi": {"enabled": false, "min": 20, "max": 80},
+    "rsi_oversold": {"enabled": true, "threshold": 30},
+    "rsi_overbought": {"enabled": false, "threshold": 70},
+    "macd_golden_cross": {"enabled": false},
+    "macd_death_cross": {"enabled": false},
+    "kdj": {"enabled": false, "min": 10, "max": 90},
+    "kdj_low_cross": {"enabled": true, "threshold": 25},
+    "bb_position": {"enabled": true, "position": "lower"},
+    "ma_trend": {"enabled": false, "type": "bullish"},
+    "price_vs_ma20": {"enabled": false, "relation": "below", "pct": 5.0},
+    "price_vs_ma60": {"enabled": false, "relation": "below", "pct": 10.0},
+    "atr_ratio": {"enabled": false, "min": 0.5},
+    "high_low_ratio": {"enabled": false, "min": 0.8}
+  },
+  "signal_weights": {
+    "macd_golden": 2.0,
+    "rsi_oversold": 2.0,
+    "kdj_cross": 2.0,
+    "volume": 0.5
+  }
+}

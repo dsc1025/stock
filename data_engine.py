@@ -41,6 +41,11 @@ def clear_hist_cache():
     _hist_cache.clear()
 
 
+def update_hist_cache(data: dict[str, pd.DataFrame]):
+    """批量更新内存缓存（避免后续重复查询数据库）。"""
+    _hist_cache.update(data)
+
+
 def get_cached_stock_codes() -> list[str]:
     """返回数据库中已缓存历史数据的股票代码列表。"""
     return db_manager.get_cached_stock_codes()
@@ -66,7 +71,7 @@ def get_all_stock_codes() -> list[str]:
     return []
 
 
-def _fetch_history_from_api(code: str, days: int = 60) -> pd.DataFrame:
+def _fetch_history_from_api(code: str, days: int = 120) -> pd.DataFrame:
     """直接调用 baostock API 获取历史K线，不经过任何缓存。"""
     end = datetime.today().strftime("%Y-%m-%d")
     start = (datetime.today() - timedelta(days=days + 30)).strftime("%Y-%m-%d")
@@ -90,7 +95,7 @@ def _fetch_history_from_api(code: str, days: int = 60) -> pd.DataFrame:
     return df.dropna(subset=["close"]).tail(days).reset_index(drop=True)
 
 
-def get_stock_history(code: str, days: int = 60) -> pd.DataFrame:
+def get_stock_history(code: str, days: int = 120) -> pd.DataFrame:
     """
     获取历史K线数据。优先级：内存缓存 → 数据库 → baostock API。
     """
@@ -131,7 +136,7 @@ def refresh_hist_cache(codes: list[str], on_progress=None) -> tuple[int, int]:
         if i % 200 == 0:
             _bs_login()
         try:
-            df = _fetch_history_from_api(code, days=60)
+            df = _fetch_history_from_api(code, days=120)
             if not df.empty:
                 db_manager.save_stock_history(code, df)
                 _hist_cache[code] = df  # 同时更新内存缓存

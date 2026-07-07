@@ -1,22 +1,22 @@
 {
-  "name": "高增长型 - 高换手、高波动、温和上涨",
+  "name": "动量突破型 — 放量突破、RSI强势区、均线支撑",
   "filters": {
     "turnover": {"min": 5.0, "max": 50.0, "enabled": true},
     "amplitude": {"min": 3.0, "max": 20.0, "enabled": true},
-    "pct_change": {"min": 1.0, "max": 15.0, "enabled": true},
-    "price_range": {"min": 5, "max": 500, "enabled": true},
-    "volume_rate": {"enabled": false, "min_vs_avg": 1.5, "days": 5},
-    "rsi": {"enabled": false, "min": 20, "max": 80},
+    "pct_change": {"min": 2.0, "max": 10.0, "enabled": true},
+    "price_range": {"min": 5, "max": 300, "enabled": true},
+    "volume_rate": {"enabled": true, "min_vs_avg": 1.3, "days": 5},
+    "rsi": {"enabled": true, "min": 55, "max": 75},
     "rsi_oversold": {"enabled": false, "threshold": 30},
     "rsi_overbought": {"enabled": false, "threshold": 70},
     "macd_golden_cross": {"enabled": false},
     "macd_death_cross": {"enabled": false},
-    "kdj": {"enabled": false, "min": 10, "max": 90},
+    "kdj": {"enabled": true, "min": 50, "max": 85},
     "kdj_low_cross": {"enabled": false, "threshold": 30},
     "bb_position": {"enabled": false, "position": "lower"},
-    "ma_trend": {"enabled": false, "type": "bullish"},
-    "price_vs_ma20": {"enabled": false, "relation": "above", "pct": 2.0},
-    "price_vs_ma60": {"enabled": false, "relation": "above", "pct": 5.0},
+    "ma_trend": {"enabled": true, "type": "bullish"},
+    "price_vs_ma20": {"enabled": true, "relation": "above", "pct": 0.0},
+    "price_vs_ma60": {"enabled": false, "relation": "above", "pct": 0.0},
     "atr_ratio": {"enabled": false, "min": 0.5},
     "high_low_ratio": {"enabled": false, "min": 0.8}
   },
@@ -24,7 +24,6 @@
     "macd_golden": 2.0,
     "rsi_oversold": 1.5,
     "kdj_cross": 1.2,
-    "volume": 0.8
-  },
-  "max_results": 20
+    "volume": 1.5
+  }
 }

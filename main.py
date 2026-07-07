@@ -1,31 +1,24 @@
 """
-Stock quantitative analysis & simulated trading terminal.
+Stock quantitative analysis terminal.
 Uses baostock for historical/end-of-day data; refreshes on demand.
 
 Controls:
   [r] refresh data        [q] quit
-  [w] watchlist view      [a] analysis view
-  [p] portfolio view      [o] orders history
-  [b] buy order           [s] sell order
-  [+] add to watchlist    [-] remove from watchlist
-  [R] reset portfolio
+  [a] analysis view       [f] stock picker
+  [c] cache manager       [+] add to watchlist
+  [-] remove from watchlist
 """
 from __future__ import annotations
-import sys
 import os
 import time
-import threading
 import json
 from datetime import datetime
 from typing import Optional, List, Dict
 
 from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
-from rich.columns import Columns
 from rich.prompt import Prompt, Confirm
 from rich.rule import Rule
 from rich import box
@@ -36,11 +29,10 @@ from rich.progress import (
 import pandas as pd
 
 from data_engine import (
-    login, logout, get_stock_history, clear_hist_cache,
+    login, logout, get_stock_history, clear_hist_cache, update_hist_cache,
     add_indicators, generate_signals, get_market_snapshot, get_realtime_quotes,
     get_all_stock_codes, get_cached_stock_codes, refresh_hist_cache,
 )
-from trading_engine import Portfolio
 import db_manager
 
 console = Console()
@@ -57,44 +49,6 @@ DEFAULT_WATCHLIST = [
     "sh.688599",  # 天合光能
 ]
 
-WATCHLIST_FILE = "watchlist.txt"
-PORTFOLIO_INITIAL = 1_000_000.0
-
-# A股备用扩展池 - 当自选股数量不足时补充候选股票
-# 注意：选股时会优先使用自选股 + filter配置中的pool字段
-A_SHARE_POOL = [
-    "sh.600519",  # 贵州茅台
-    "sh.601318",  # 中国平安
-    "sh.600036",  # 招商银行
-    "sz.000858",  # 五粮液
-    "sh.600900",  # 长江电力
-    "sz.300750",  # 宁德时代
-    "sz.000001",  # 平安银行
-    "sh.688599",  # 天合光能
-    "sz.000651",  # 格力电器
-    "sh.601988",  # 中国银行
-    "sh.603501",  # 韦尔股份
-    "sz.002594",  # 比亚迪
-    "sh.600028",  # 中国石化
-    "sz.000333",  # 美的集团
-    "sh.601398",  # 工商银行
-    "sh.600030",  # 中信证券
-    "sz.000002",  # 万科A
-    "sh.601166",  # 兴业银行
-    "sz.300059",  # 东方财富
-    "sh.600276",  # 恒瑞医药
-    "sz.000538",  # 云南白药
-    "sh.601888",  # 中国中免
-    "sz.002415",  # 海康威视
-    "sh.600887",  # 伊利股份
-    "sz.000725",  # 京东方A
-    "sh.601601",  # 中国太保
-    "sz.300015",  # 爱尔眼科
-    "sh.600050",  # 中国联通
-    "sz.002236",  # 大华股份
-    "sh.601919",  # 中远海控
-]
-
 
 def load_watchlist() -> list[str]:
     codes = db_manager.load_watchlist()
@@ -109,48 +63,107 @@ def save_watchlist(codes: list[str]):
 # 选股配置管理函数
 # ─────────────────────────────────────────────────────────────────────────
 
+# ── 选股配置：文件为主，DB 为运行时缓存 ──
+
+_STOCK_PICKER_CONFIG_FILE = "stock_picker_config.json"
+_FILTERS_DIR = "filters"
+
+
 def load_picker_config() -> dict:
-    """加载选股配置，优先从数据库读取，不存在则返回默认配置"""
+    """加载选股配置：文件优先，DB 回退，最后用默认值。"""
+    # 1. 优先从 JSON 文件读取（方便手动编辑）
+    cfg = _load_json_file(_STOCK_PICKER_CONFIG_FILE)
+    if cfg:
+        return cfg
+    # 2. 回退到数据库
     cfg = db_manager.load_config("stock_picker")
-    return cfg if cfg else get_default_picker_config()
+    if cfg:
+        return cfg
+    # 3. 最后使用代码默认值
+    return _get_default_picker_config()
 
 
-def get_default_picker_config() -> dict:
-    """返回默认选股配置 - 包含所有可用的筛选因子"""
+def load_preset_filters() -> dict[str, dict]:
+    """加载预设筛选策略：文件优先，DB 回退。返回 {key: {name, config}}。"""
+    presets = {}
+
+    # 1. 优先从 filters/ 目录读取 JSON 文件
+    if os.path.exists(_FILTERS_DIR):
+        for idx, filename in enumerate(
+            sorted(f for f in os.listdir(_FILTERS_DIR) if f.endswith(".json")), 1
+        ):
+            cfg = _load_json_file(os.path.join(_FILTERS_DIR, filename))
+            if cfg:
+                presets[str(idx)] = {"config": cfg, "name": cfg.get("name", filename)}
+
+    # 2. 如果文件为空，尝试从 DB 加载
+    if not presets:
+        try:
+            for i in range(1, 20):
+                key = f"filter_0{i}" if i < 10 else f"filter_{i}"
+                cfg = db_manager.load_config(key)
+                if cfg:
+                    presets[str(i)] = {"config": cfg, "name": cfg.get("name", f"Preset {i}")}
+        except Exception:
+            pass
+
+    return presets
+
+
+def _load_json_file(path: str) -> dict | None:
+    """安全读取 JSON 文件，失败返回 None。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _get_default_picker_config() -> dict:
+    """返回默认选股配置（代码内置兜底）。"""
     return {
         "filters": {
-            "turnover": {"min": 2.0, "max": 50.0, "enabled": True},  # 换手率(%)范围
-            "amplitude": {"min": 2.0, "max": 20.0, "enabled": True},  # 振幅(%)范围
-            "pct_change": {"min": -5.0, "max": 15.0, "enabled": True},  # 涨跌幅(%)范围
-            "price_range": {"min": 5, "max": 500, "enabled": True},  # 股价范围(¥)
-            "volume_rate": {"enabled": False, "min_vs_avg": 1.5, "days": 5},  # 成交量倍数
-            "rsi": {"enabled": False, "min": 20, "max": 80},  # RSI值范围
-            "rsi_oversold": {"enabled": False, "threshold": 30},  # RSI超卖(<30)
-            "rsi_overbought": {"enabled": False, "threshold": 70},  # RSI超买(>70)
-            "macd_golden_cross": {"enabled": False},  # MACD金叉信号
-            "macd_death_cross": {"enabled": False},  # MACD死叉信号
-            "kdj": {"enabled": False, "min": 10, "max": 90},  # KDJ-K值范围
-            "kdj_low_cross": {"enabled": False, "threshold": 30},  # KDJ低位金叉
-            "bb_position": {"enabled": False, "position": "lower"},  # 布林带位置
-            "ma_trend": {"enabled": False, "type": "bullish"},  # 均线趋势
-            "price_vs_ma20": {"enabled": False, "relation": "above", "pct": 2.0},  # 价格vs MA20
-            "price_vs_ma60": {"enabled": False, "relation": "above", "pct": 5.0},  # 价格vs MA60
-            "atr_ratio": {"enabled": False, "min": 0.5},  # ATR波动性
-            "high_low_ratio": {"enabled": False, "min": 0.8},  # 最低价/最高价比值
+            "turnover": {"min": 2.0, "max": 50.0, "enabled": True},
+            "amplitude": {"min": 2.0, "max": 20.0, "enabled": True},
+            "pct_change": {"min": -5.0, "max": 15.0, "enabled": True},
+            "price_range": {"min": 5, "max": 500, "enabled": True},
+            "volume_rate": {"enabled": False, "min_vs_avg": 1.5, "days": 5},
+            "rsi": {"enabled": False, "min": 20, "max": 80},
+            "rsi_oversold": {"enabled": False, "threshold": 30},
+            "rsi_overbought": {"enabled": False, "threshold": 70},
+            "macd_golden_cross": {"enabled": False},
+            "macd_death_cross": {"enabled": False},
+            "kdj": {"enabled": False, "min": 10, "max": 90},
+            "kdj_low_cross": {"enabled": False, "threshold": 30},
+            "bb_position": {"enabled": False, "position": "lower"},
+            "ma_trend": {"enabled": False, "type": "bullish"},
+            "price_vs_ma20": {"enabled": False, "relation": "above", "pct": 2.0},
+            "price_vs_ma60": {"enabled": False, "relation": "above", "pct": 5.0},
+            "atr_ratio": {"enabled": False, "min": 0.5},
+            "high_low_ratio": {"enabled": False, "min": 0.8},
         },
         "signal_weights": {
-            "macd_golden": 2.0,  # MACD金叉权重
-            "rsi_oversold": 1.5,  # RSI超卖权重
-            "kdj_cross": 1.2,  # KDJ金叉权重
-            "volume": 0.8,  # 成交量权重
+            "macd_golden": 2.0,
+            "rsi_oversold": 1.5,
+            "kdj_cross": 1.2,
+            "volume": 0.8,
         },
-        "max_results": 20,  # 最多返回20个结果
     }
 
 
 def save_picker_config(cfg: dict):
-    """保存选股配置到数据库"""
-    db_manager.save_config("stock_picker", cfg, "选股配置")
+    """同时写入 JSON 文件和数据库（双重保障）。"""
+    # 写文件
+    try:
+        with open(_STOCK_PICKER_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    # 写数据库
+    try:
+        db_manager.save_config("stock_picker", cfg, "选股配置")
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -159,56 +172,75 @@ def save_picker_config(cfg: dict):
 
 def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
     """
-    核心选股引擎 - 使用数据库缓存进行筛选，无需实时网络请求。
+    核心选股引擎 - 使用数据库批量加载 + SQL预筛选，性能大幅优化。
 
     处理流程：
-    1. pool=None 时自动取所有已缓存股票
-    2. 从数据库读取K线，计算指标并应用筛选
-    3. 仅对通过筛选的少量候选股批量拉取实时行情（取名称+实时价）
+    1. SQL预筛选：将价格/换手率/涨跌幅/振幅等简单条件推入SQL，快速缩小候选范围
+    2. 批量加载：一次SQL查询拉取所有候选股的历史K线
+    3. 内存计算：对候选股逐只计算技术指标并应用复杂筛选条件
+    4. 仅对通过筛选的少量候选股批量拉取实时行情（取名称+实时价）
     """
-    if not pool:
-        pool = get_cached_stock_codes()
-    if not pool:
+    # ── Step 1: SQL 预筛选（价格、换手率、涨跌幅、振幅） ──
+    prefiltered = db_manager.prefilter_codes_by_latest(config["filters"])
+
+    if prefiltered is not None:
+        # SQL 预筛选生效
+        code_set = set(prefiltered)
+        if pool:
+            code_set &= set(pool)
+        codes = [c for c in prefiltered if c in code_set]  # preserve order
+    else:
+        # 没有启用简单筛选条件，使用全部
+        codes = pool if pool else get_cached_stock_codes()
+
+    if not codes:
         return []
 
+    # ── Step 2: 批量加载预计算指标（一次SQL，取最后2行，无pandas） ──
+    ind_map = db_manager.load_latest_indicators_batch(codes)
+
+    # ── Step 2.5: Pre-fetch avg volume for volume_rate filter ──
+    _vol_avg_cache: dict[str, float] = {}
+    if config["filters"].get("volume_rate", {}).get("enabled", False):
+        days_n = config["filters"]["volume_rate"].get("days", 5)
+        _vol_avg_cache = db_manager.get_avg_volume_batch(codes, days_n)
+
+    # ── Step 3: 直接使用预计算指标应用筛选 ──
     candidates = []
 
-    for code in pool:
-        # 从数据库读取缓存
-        df_hist = get_stock_history(code)
-        if df_hist is None or df_hist.empty or len(df_hist) < 2:
+    for code, rows in ind_map.items():
+        last = rows["last"]
+        prev = rows["prev"]
+        if last is None:
             continue
+        # If only 1 row exists, prev = last (no historical comparison)
+        if prev is None:
+            prev = last
 
         try:
-            df_hist = add_indicators(df_hist)
-            last = df_hist.iloc[-1]   # 最新一个交易日
-            prev = df_hist.iloc[-2]   # 前一个交易日
-
-            # 从缓存数据提取基本指标
-            price      = float(last["close"])
-            open_      = float(last["open"])  if pd.notna(last.get("open"))  else price
-            high_      = float(last["high"])  if pd.notna(last.get("high"))  else price
-            low_       = float(last["low"])   if pd.notna(last.get("low"))   else price
-            turnover   = float(last.get("turn",   0) or 0)
-            pct_change = float(last.get("pctChg", 0) or 0)
+            price      = float(last["close"] or 0)
+            open_      = float(last["open"] or price)
+            high_      = float(last["high"] or price)
+            low_       = float(last["low"] or price)
+            turnover   = float(last["turn"] or 0)
+            pct_change = float(last["pctChg"] or 0)
             amplitude  = (high_ - low_) / open_ * 100 if open_ > 0 else 0
+            volume     = float(last["volume"] or 0)
 
-            # 技术指标
-            rsi    = float(last.get("RSI14", 50) or 50)
-            k      = float(last.get("K",     50) or 50)
-            d      = float(last.get("D",     50) or 50)
-            dif    = float(last.get("DIF",    0) or 0)
-            dea    = float(last.get("DEA",    0) or 0)
-            prev_k = float(prev.get("K",     50) or 50)
-            prev_d = float(prev.get("D",     50) or 50)
-            prev_dif = float(prev.get("DIF",  0) or 0)
-            prev_dea = float(prev.get("DEA",  0) or 0)
-            ma20   = float(last.get("MA20",  price) or price)
-            ma60   = float(last.get("MA60",  price) or price)
-            bb_up  = float(last.get("BB_UP", price + 1) or price + 1)
-            bb_lo  = float(last.get("BB_LO", price - 1) or price - 1)
-            atr    = float(last.get("ATR14",  0) or 0)
-
+            rsi = float(last["RSI14"] or 50)
+            k   = float(last["K"] or 50)
+            d   = float(last["D"] or 50)
+            dif = float(last["DIF"] or 0)
+            dea = float(last["DEA"] or 0)
+            prev_k   = float(prev["K"] or 50)
+            prev_d   = float(prev["D"] or 50)
+            prev_dif = float(prev["DIF"] or 0)
+            prev_dea = float(prev["DEA"] or 0)
+            ma20  = float(last["MA20"] or price)
+            ma60  = float(last["MA60"] or price)
+            bb_up = float(last["BB_UP"] or price + 1)
+            bb_lo = float(last["BB_LO"] or price - 1)
+            atr   = float(last["ATR14"] or 0)
         except Exception:
             continue
 
@@ -219,32 +251,41 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
         def _chk(key: str) -> bool:
             return config["filters"][key].get("enabled", False)
 
-        # 1 换手率
+        # 1 换手率 — SQL 已预筛选，但仍需 double-check（防御性）
         if _chk("turnover"):
             lo = config["filters"]["turnover"]["min"]
             hi = config["filters"]["turnover"].get("max", 100)
-            if not (lo <= turnover <= hi): passed = False
-        # 2 振幅
+            if not (lo <= turnover <= hi):
+                passed = False
+        # 2 振幅 — SQL 已预筛选
         if _chk("amplitude"):
-            if amplitude < config["filters"]["amplitude"]["min"]: passed = False
-        # 3 涨跌幅
+            if amplitude < config["filters"]["amplitude"]["min"]:
+                passed = False
+            if "max" in config["filters"]["amplitude"]:
+                if amplitude > config["filters"]["amplitude"]["max"]:
+                    passed = False
+        # 3 涨跌幅 — SQL 已预筛选
         if _chk("pct_change"):
             lo = config["filters"]["pct_change"]["min"]
             hi = config["filters"]["pct_change"]["max"]
-            if not (lo <= pct_change <= hi): passed = False
-        # 4 股价范围
+            if not (lo <= pct_change <= hi):
+                passed = False
+        # 4 股价范围 — SQL 已预筛选
         if _chk("price_range"):
             lo = config["filters"]["price_range"]["min"]
             hi = config["filters"]["price_range"]["max"]
-            if not (lo <= price <= hi): passed = False
-        # 5 成交量突增
+            if not (lo <= price <= hi):
+                passed = False
+        # 5 成交量突增 — 预取批量volume数据
         if _chk("volume_rate"):
             days_n = config["filters"]["volume_rate"].get("days", 5)
-            min_r  = config["filters"]["volume_rate"].get("min_vs_avg", 1.5)
-            avg_vol = df_hist.iloc[-days_n:]["volume"].mean()
+            min_r = config["filters"]["volume_rate"].get("min_vs_avg", 1.5)
+            # Use pre-fetched avg volume dict
+            avg_vol = _vol_avg_cache.get(code, 0)
             if avg_vol > 0:
-                cur_r = float(last["volume"]) / avg_vol
-                if cur_r < min_r: passed = False
+                cur_r = volume / avg_vol
+                if cur_r < min_r:
+                    passed = False
                 scores["volume"] = min(cur_r, 2.0)
         # 6 RSI 范围
         if _chk("rsi"):
@@ -253,22 +294,26 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
         # 7 RSI 超卖
         if _chk("rsi_oversold"):
             thr = config["filters"]["rsi_oversold"]["threshold"]
-            if rsi >= thr: passed = False
+            if rsi >= thr:
+                passed = False
             scores["rsi_oversold"] = 1.0 - rsi / thr
         # 8 RSI 超买
         if _chk("rsi_overbought"):
             thr = config["filters"]["rsi_overbought"]["threshold"]
-            if rsi <= thr: passed = False
+            if rsi <= thr:
+                passed = False
             scores["rsi_overbought"] = rsi / 100 - thr / 100
         # 9 MACD 金叉
         if _chk("macd_golden_cross"):
             is_cross = prev_dif < prev_dea and dif > dea
-            if not is_cross: passed = False
+            if not is_cross:
+                passed = False
             scores["macd_golden"] = 2.0 if is_cross else 0
         # 10 MACD 死叉
         if _chk("macd_death_cross"):
             is_cross = prev_dif > prev_dea and dif < dea
-            if not is_cross: passed = False
+            if not is_cross:
+                passed = False
             scores["macd_death"] = 1.0 if is_cross else 0
         # 11 KDJ 范围
         if _chk("kdj"):
@@ -278,45 +323,56 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
         if _chk("kdj_low_cross"):
             thr = config["filters"]["kdj_low_cross"]["threshold"]
             is_cross = prev_k < prev_d and k > d and k < thr
-            if not is_cross: passed = False
+            if not is_cross:
+                passed = False
             scores["kdj_cross"] = 1.2 if is_cross else 0
         # 13 布林带位置
         if _chk("bb_position"):
             pos = config["filters"]["bb_position"]["position"]
             dist = (price - bb_lo) / (bb_up - bb_lo) if bb_up > bb_lo else 0.5
             if pos == "lower":
-                if dist > 0.3: passed = False
+                if dist > 0.3:
+                    passed = False
                 scores["bb"] = 1.0 - dist
             elif pos == "upper":
-                if dist < 0.7: passed = False
+                if dist < 0.7:
+                    passed = False
                 scores["bb"] = dist
         # 14 均线趋势
         if _chk("ma_trend"):
             t = config["filters"]["ma_trend"]["type"]
-            if t == "bullish" and not (price > ma20 > ma60): passed = False
-            if t == "bearish" and not (price < ma20 < ma60): passed = False
+            if t == "bullish" and not (price > ma20 > ma60):
+                passed = False
+            if t == "bearish" and not (price < ma20 < ma60):
+                passed = False
             scores["ma_trend"] = 1.0
         # 15 价格 vs MA20
         if _chk("price_vs_ma20"):
             rel = config["filters"]["price_vs_ma20"]["relation"]
             pct = config["filters"]["price_vs_ma20"]["pct"]
-            if rel == "above" and price < ma20 * (1 + pct / 100): passed = False
-            if rel == "below" and price > ma20 * (1 - pct / 100): passed = False
+            if rel == "above" and price < ma20 * (1 + pct / 100):
+                passed = False
+            if rel == "below" and price > ma20 * (1 - pct / 100):
+                passed = False
         # 16 价格 vs MA60
         if _chk("price_vs_ma60"):
             rel = config["filters"]["price_vs_ma60"]["relation"]
             pct = config["filters"]["price_vs_ma60"]["pct"]
-            if rel == "above" and price < ma60 * (1 + pct / 100): passed = False
-            if rel == "below" and price > ma60 * (1 - pct / 100): passed = False
+            if rel == "above" and price < ma60 * (1 + pct / 100):
+                passed = False
+            if rel == "below" and price > ma60 * (1 - pct / 100):
+                passed = False
         # 17 ATR 波动性
         if _chk("atr_ratio"):
             ratio = atr / price * 100 if price > 0 else 0
-            if ratio < config["filters"]["atr_ratio"]["min"]: passed = False
+            if ratio < config["filters"]["atr_ratio"]["min"]:
+                passed = False
             scores["atr"] = min(ratio / 2, 1.0)
         # 18 最低价/最高价比值
         if _chk("high_low_ratio"):
             hl = low_ / high_ if high_ > 0 else 0
-            if hl < config["filters"]["high_low_ratio"]["min"]: passed = False
+            if hl < config["filters"]["high_low_ratio"]["min"]:
+                passed = False
             scores["hl_ratio"] = hl
 
         if not passed:
@@ -330,7 +386,7 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
 
         candidates.append({
             "code": code,
-            "name": code,         # 名称待后面实时更新
+            "name": code,
             "price": price,
             "pct_change": pct_change,
             "turnover": turnover,
@@ -352,11 +408,11 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             if rt:
                 c["name"] = rt.get("name", c["code"])
                 if rt.get("close", 0) > 0:
-                    c["price"]      = rt["close"]
+                    c["price"] = rt["close"]
                     c["pct_change"] = rt.get("pctChg", c["pct_change"])
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
-    return candidates[: config.get("max_results", 20)]
+    return candidates
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -419,26 +475,8 @@ def menu_stock_picker(watchlist: list[str]):
         Prompt.ask("\n按 Enter 返回")
         return
 
-    # 从数据库或文件读取预设条件
-    filters_dir = "filters"
-    preset_configs = {}
-    # 尝试从数据库读取
-    try:
-        for i in range(1, 20):
-            cfg = db_manager.load_config(f"filter_0{i}" if i < 10 else f"filter_{i}")
-            if cfg:
-                preset_configs[str(i)] = {"config": cfg, "name": cfg.get("name", f"Preset {i}")}
-    except Exception:
-        pass
-    # 如果数据库没有，回退到文件
-    if not preset_configs and os.path.exists(filters_dir):
-        for idx, filename in enumerate(sorted(f for f in os.listdir(filters_dir) if f.endswith(".json")), 1):
-            try:
-                with open(os.path.join(filters_dir, filename), "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                preset_configs[str(idx)] = {"config": cfg, "name": cfg.get("name", filename)}
-            except Exception:
-                continue
+    # 从文件读取预设条件（文件优先，DB 回退）
+    preset_configs = load_preset_filters()
 
     # 显示预设列表
     config = None
@@ -564,14 +602,6 @@ def color_pct(pct: float) -> str:
     return f"{pct:.2f}%"
 
 
-def color_val(val: float) -> str:
-    if val > 0:
-        return f"[bold red]+{val:,.2f}[/]"
-    elif val < 0:
-        return f"[bold green]{val:,.2f}[/]"
-    return f"{val:,.2f}"
-
-
 def _strip_prefix(code: str) -> str:
     """Strip exchange prefix for display: 'sh.600519' → '600519'."""
     for pfx in ("sh.", "sz.", "bj."):
@@ -588,10 +618,7 @@ def _auto_prefix(num: str) -> str:
 
 # ── Views ────────────────────────────────────────────────────────
 
-def make_watchlist_table(snapshots: list[dict], portfolio: Portfolio) -> Table:
-    prices = {s["code"]: s["close"] for s in snapshots}
-    held = set(portfolio.positions.keys())
-
+def make_watchlist_table(snapshots: list[dict]) -> Table:
     t = Table(
         title="[bold cyan]实时行情[/]",
         box=box.SIMPLE_HEAVY,
@@ -606,12 +633,10 @@ def make_watchlist_table(snapshots: list[dict], portfolio: Portfolio) -> Table:
     t.add_column("最高", justify="right", width=10)
     t.add_column("最低", justify="right", width=10)
     t.add_column("成交量(手)", justify="right", width=12)
-    t.add_column("持仓", justify="center", width=6)
 
     for s in snapshots:
         code = s["code"]
         name = s.get("name", "")
-        held_mark = "[bold yellow]★[/]" if code in held else ""
         t.add_row(
             _strip_prefix(code),
             name,
@@ -621,17 +646,16 @@ def make_watchlist_table(snapshots: list[dict], portfolio: Portfolio) -> Table:
             f"¥{s['high']:.2f}",
             f"¥{s['low']:.2f}",
             f"{int(s['volume']/100):,}",
-            held_mark,
         )
     return t
 
 
 def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, realtime_pct: float = 0) -> Panel:
-    df = get_stock_history(code, days=60)
+    df = get_stock_history(code, days=120)
     if df.empty:
         return Panel(f"[red]无法获取 {code} 历史数据[/]", title="分析")
 
-    df = add_indicators(df)
+    df = add_indicators(df) if "RSI14" not in df.columns else df  # compute only if missing
     last = df.iloc[-1]
     signals = generate_signals(df)
     
@@ -691,93 +715,6 @@ def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, re
     )
 
 
-def make_portfolio_panel(portfolio: Portfolio, prices: dict[str, float]) -> Panel:
-    total = portfolio.total_assets(prices)
-    mv = portfolio.market_value(prices)
-    pnl = portfolio.pnl(prices)
-    pnl_pct = portfolio.pnl_pct(prices)
-
-    summary = Table.grid(expand=True)
-    summary.add_column(ratio=1)
-    summary.add_column(ratio=1)
-    summary.add_column(ratio=1)
-    summary.add_column(ratio=1)
-    summary.add_row(
-        f"[dim]总资产:[/] [bold]¥{total:,.2f}[/]",
-        f"[dim]可用资金:[/] [bold]¥{portfolio.cash:,.2f}[/]",
-        f"[dim]持仓市值:[/] [bold]¥{mv:,.2f}[/]",
-        f"[dim]总盈亏:[/] {color_val(pnl)} ({color_pct(pnl_pct)})",
-    )
-
-    pos_table = Table(
-        box=box.SIMPLE,
-        header_style="bold magenta",
-        show_lines=True,
-    )
-    pos_table.add_column("代码", style="cyan")
-    pos_table.add_column("名称")
-    pos_table.add_column("持股数", justify="right")
-    pos_table.add_column("成本价", justify="right")
-    pos_table.add_column("现价", justify="right")
-    pos_table.add_column("持仓市值", justify="right")
-    pos_table.add_column("盈亏", justify="right")
-    pos_table.add_column("盈亏%", justify="right")
-    pos_table.add_column("买入日期")
-
-    if not portfolio.positions:
-        pos_table.add_row(*["—"] * 9)
-    else:
-        for code, pos in portfolio.positions.items():
-            price = prices.get(code, pos.avg_cost)
-            p_pnl, p_pnl_pct = portfolio.position_pnl(code, price)
-            pos_table.add_row(
-                _strip_prefix(code),
-                pos.name,
-                f"{pos.shares:,}",
-                f"¥{pos.avg_cost:.2f}",
-                f"¥{price:.2f}",
-                f"¥{pos.shares * price:,.2f}",
-                Text.from_markup(color_val(p_pnl)),
-                Text.from_markup(color_pct(p_pnl_pct)),
-                pos.buy_date,
-            )
-
-    content = Table.grid(expand=True)
-    content.add_row(summary)
-    content.add_row(Rule(style="dim"))
-    content.add_row(pos_table)
-
-    return Panel(content, title="[bold cyan]模拟持仓[/]", border_style="green")
-
-
-def make_orders_panel(portfolio: Portfolio) -> Panel:
-    t = Table(box=box.SIMPLE, header_style="bold magenta", show_lines=False)
-    t.add_column("单号", width=6)
-    t.add_column("时间", width=20)
-    t.add_column("代码", width=12)
-    t.add_column("方向", width=6)
-    t.add_column("数量", justify="right", width=8)
-    t.add_column("价格", justify="right", width=10)
-    t.add_column("金额", justify="right", width=14)
-    t.add_column("备注")
-
-    orders = list(reversed(portfolio.orders[-50:]))
-    for o in orders:
-        side_style = "[red]买入[/]" if o.side == "buy" else "[green]卖出[/]"
-        t.add_row(
-            str(o.order_id),
-            o.timestamp,
-            _strip_prefix(o.code),
-            Text.from_markup(side_style),
-            f"{o.shares:,}",
-            f"¥{o.price:.2f}",
-            f"¥{o.amount:,.2f}",
-            o.note,
-        )
-
-    return Panel(t, title="[bold cyan]成交记录 (最近50条)[/]", border_style="blue")
-
-
 def _sparkline(values: list[float]) -> str:
     if not values:
         return ""
@@ -793,111 +730,6 @@ def _sparkline(values: list[float]) -> str:
 
 
 # ── Interactive menus ────────────────────────────────────────────
-
-def menu_buy(portfolio: Portfolio, watchlist: list[str], prices: dict[str, float]):
-    console.print("\n[bold cyan]=== 模拟买入 ===[/]")
-    for i, code in enumerate(watchlist):
-        p = prices.get(code, 0)
-        console.print(f"  {i+1}. {_strip_prefix(code)}  ¥{p:.2f}")
-
-    choice = Prompt.ask("输入股票代码 (如 600519) 或序号", default="")
-    if not choice:
-        return
-    if choice.isdigit() and len(choice) <= 2:
-        idx = int(choice) - 1
-        if 0 <= idx < len(watchlist):
-            code = watchlist[idx]
-        else:
-            console.print("[red]无效序号[/]")
-            return
-    elif choice.isdigit():
-        code = _auto_prefix(choice)
-    else:
-        code = choice.strip()
-
-    price = prices.get(code, 0)
-    if price == 0:
-        try:
-            price = float(Prompt.ask("未在行情列表中, 请手动输入价格"))
-        except ValueError:
-            console.print("[red]价格无效[/]")
-            return
-
-    rt = get_realtime_quotes([code])
-    name = rt[0]["name"] if rt else code
-    max_shares = portfolio.max_buyable_shares(price)
-    console.print(f"[dim]{name} @ ¥{price:.2f}, 最多可买 {max_shares} 股[/]")
-
-    try:
-        shares = int(Prompt.ask("买入股数 (100的整数倍)", default="100"))
-    except ValueError:
-        console.print("[red]数量无效[/]")
-        return
-
-    note = Prompt.ask("备注 (可选)", default="")
-    ok, msg = portfolio.buy(code, name, shares, price, note)
-    if ok:
-        console.print(f"[bold green]{msg}[/]")
-    else:
-        console.print(f"[bold red]{msg}[/]")
-    time.sleep(1)
-
-
-def menu_sell(portfolio: Portfolio, prices: dict[str, float]):
-    console.print("\n[bold cyan]=== 模拟卖出 ===[/]")
-    if not portfolio.positions:
-        console.print("[yellow]暂无持仓[/]")
-        time.sleep(1)
-        return
-
-    codes = list(portfolio.positions.keys())
-    for i, code in enumerate(codes):
-        pos = portfolio.positions[code]
-        price = prices.get(code, pos.avg_cost)
-        pnl, pnl_pct = portfolio.position_pnl(code, price)
-        console.print(
-            f"  {i+1}. {_strip_prefix(code)} {pos.name}  持{pos.shares}股  "
-            f"现价¥{price:.2f}  {color_pct(pnl_pct)}"
-        )
-
-    choice = Prompt.ask("输入序号或股票代码")
-    if not choice:
-        return
-    if choice.isdigit() and len(choice) <= 2:
-        idx = int(choice) - 1
-        if 0 <= idx < len(codes):
-            code = codes[idx]
-        else:
-            console.print("[red]无效序号[/]")
-            return
-    elif choice.isdigit():
-        code = _auto_prefix(choice)
-    else:
-        code = choice.strip()
-
-    if code not in portfolio.positions:
-        console.print(f"[red]未持有 {code}[/]")
-        time.sleep(1)
-        return
-
-    pos = portfolio.positions[code]
-    price = prices.get(code, pos.avg_cost)
-    console.print(f"[dim]当前持有 {pos.shares} 股, 现价 ¥{price:.2f}[/]")
-
-    try:
-        shares = int(Prompt.ask(f"卖出股数 (100的整数倍, 最多{pos.shares})", default=str(pos.shares)))
-    except ValueError:
-        console.print("[red]数量无效[/]")
-        return
-
-    note = Prompt.ask("备注 (可选)", default="")
-    ok, msg = portfolio.sell(code, shares, price, note)
-    if ok:
-        console.print(f"[bold green]{msg}[/]")
-    else:
-        console.print(f"[bold red]{msg}[/]")
-    time.sleep(1)
-
 
 def menu_add_stock(watchlist: list[str]) -> list[str]:
     raw = Prompt.ask("输入添加的股票代码 (如 600519)").strip()
@@ -978,10 +810,6 @@ def main():
     login()
 
     watchlist = load_watchlist()
-    portfolio = Portfolio(initial_cash=PORTFOLIO_INITIAL)
-    portfolio.load()
-
-    view = "w"        # w=watchlist, p=portfolio, o=orders
     snapshots: list[dict] = []
     last_refresh = ""
 
@@ -993,26 +821,18 @@ def main():
     refresh()   # initial load
 
     while True:
-        prices = {s["code"]: s["close"] for s in snapshots}
         console.clear()
         console.print(Rule(f"[dim]更新: {last_refresh}[/]"))
 
-        if view == "w":
-            if snapshots:
-                console.print(make_watchlist_table(snapshots, portfolio))
-            else:
-                console.print("[yellow]暂无行情数据, 按 r 刷新[/]")
-
-        elif view == "p":
-            console.print(make_portfolio_panel(portfolio, prices))
-
-        elif view == "o":
-            console.print(make_orders_panel(portfolio))
+        if snapshots:
+            console.print(make_watchlist_table(snapshots))
+        else:
+            console.print("[yellow]暂无行情数据, 按 r 刷新[/]")
 
         console.print()
         key = Prompt.ask(
-            "[dim]r刷新 w行情 a分析 f选股 c缓存 p持仓 o记录 b买 s卖 +加 -删 q退[/]",
-            choices=["r","w","a","f","c","p","o","b","s","+","-","R","q"],
+            "[dim]r刷新 a分析 f选股 c缓存 +加 -删 q退[/]",
+            choices=["r", "a", "f", "c", "+", "-", "q"],
             show_choices=False,
         )
 
@@ -1020,41 +840,22 @@ def main():
             break
         elif key == "r":
             refresh()
-        elif key == "w":
-            view = "w"
-        elif key == "p":
-            view = "p"
-        elif key == "o":
-            view = "o"
         elif key == "a":
             console.clear()
             menu_analysis(watchlist)
-            snapshots = get_market_snapshot(watchlist)  # refresh after analysis
+            snapshots = get_market_snapshot(watchlist)
         elif key == "f":
             console.clear()
             menu_stock_picker(watchlist)
         elif key == "c":
             console.clear()
             menu_cache_manager()
-        elif key == "b":
-            console.clear()
-            menu_buy(portfolio, watchlist, prices)
-            view = "p"
-        elif key == "s":
-            console.clear()
-            menu_sell(portfolio, prices)
-            view = "p"
         elif key == "+":
             console.clear()
             watchlist = menu_add_stock(watchlist)
         elif key == "-":
             console.clear()
             watchlist = menu_remove_stock(watchlist)
-        elif key == "R":
-            if Confirm.ask("[bold red]确认重置模拟账户? 所有持仓和记录将清空[/]"):
-                portfolio.reset(PORTFOLIO_INITIAL)
-                console.print("[green]账户已重置[/]")
-                time.sleep(1)
 
     logout()
 
