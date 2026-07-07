@@ -6,10 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
-import json
-import os
 
-SAVE_PATH = "portfolio.json"
+import db_manager
 
 
 @dataclass
@@ -194,14 +192,12 @@ class Portfolio:
                 for o in self.orders
             ],
         }
-        with open(SAVE_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        db_manager.save_portfolio(data)
 
     def load(self):
-        if not os.path.exists(SAVE_PATH):
+        data = db_manager.load_portfolio()
+        if not data:
             return
-        with open(SAVE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
         self.cash = data.get("cash", self.cash)
         self.initial_cash = data.get("initial_cash", self.initial_cash)
         self._order_seq = data.get("order_seq", 1)
@@ -218,5 +214,10 @@ class Portfolio:
         self.positions = {}
         self.orders = []
         self._order_seq = 1
-        if os.path.exists(SAVE_PATH):
-            os.remove(SAVE_PATH)
+        db_manager.save_portfolio({
+            "cash": initial_cash,
+            "initial_cash": initial_cash,
+            "order_seq": 1,
+            "positions": {},
+            "orders": [],
+        })

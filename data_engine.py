@@ -9,18 +9,16 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import logging
-import os
 import contextlib
 import io
 import urllib.request
 import re
 
+import db_manager
+
 logging.getLogger("baostock").setLevel(logging.ERROR)
 
-# 磁盘缓存目录：存储60天K线，文件一旦存在就永久有效，只有手动刷新才覆盖
-HIST_CACHE_DIR = "cache/hist"
-
-# 内存缓存：同一次运行中避免重复读磁盘
+# 内存缓存：同一次运行中避免重复读数据库
 _hist_cache: dict[str, pd.DataFrame] = {}
 
 
@@ -39,44 +37,13 @@ def logout():
 
 
 def clear_hist_cache():
-    """清空内存缓存（磁盘文件不受影响）"""
+    """清空内存缓存（数据库不受影响）"""
     _hist_cache.clear()
 
 
-# ── 磁盘缓存辅助函数 ──────────────────────────────────────────────────
-
-def _cache_path(code: str) -> str:
-    """sh.600519 → cache/hist/sh_600519.csv"""
-    return os.path.join(HIST_CACHE_DIR, code.replace(".", "_") + ".csv")
-
-
-def load_hist_from_disk(code: str) -> pd.DataFrame | None:
-    """从磁盘加载历史K线。文件不存在则返回None，不判断有效期。"""
-    path = _cache_path(code)
-    if not os.path.exists(path):
-        return None
-    try:
-        df = pd.read_csv(path, parse_dates=["date"])
-        return df if not df.empty else None
-    except Exception:
-        return None
-
-
-def save_hist_to_disk(code: str, df: pd.DataFrame):
-    """将历史K线保存到磁盘，覆盖旧文件。"""
-    os.makedirs(HIST_CACHE_DIR, exist_ok=True)
-    df.to_csv(_cache_path(code), index=False)
-
-
 def get_cached_stock_codes() -> list[str]:
-    """返回本地已缓存历史数据的股票代码列表。"""
-    if not os.path.exists(HIST_CACHE_DIR):
-        return []
-    codes = []
-    for fname in os.listdir(HIST_CACHE_DIR):
-        if fname.endswith(".csv"):
-            codes.append(fname[:-4].replace("_", ".", 1))  # sh_600519.csv → sh.600519
-    return sorted(codes)
+    """返回数据库中已缓存历史数据的股票代码列表。"""
+    return db_manager.get_cached_stock_codes()
 
 
 def get_all_stock_codes() -> list[str]:
@@ -125,30 +92,29 @@ def _fetch_history_from_api(code: str, days: int = 60) -> pd.DataFrame:
 
 def get_stock_history(code: str, days: int = 60) -> pd.DataFrame:
     """
-    获取历史K线数据。优先级：内存缓存 → 磁盘缓存 → baostock API。
-    磁盘文件永久有效，只有手动调用刷新才覆盖。
+    获取历史K线数据。优先级：内存缓存 → 数据库 → baostock API。
     """
     # 1. 内存缓存
     if code in _hist_cache:
         return _hist_cache[code]
 
-    # 2. 磁盘缓存
-    disk_df = load_hist_from_disk(code)
-    if disk_df is not None:
-        _hist_cache[code] = disk_df
-        return disk_df
+    # 2. 数据库
+    db_df = db_manager.load_stock_history(code)
+    if db_df is not None and not db_df.empty:
+        _hist_cache[code] = db_df
+        return db_df
 
     # 3. 从 API 获取并双写缓存
     df = _fetch_history_from_api(code, days)
     if not df.empty:
-        save_hist_to_disk(code, df)
+        db_manager.save_stock_history(code, df)
         _hist_cache[code] = df
     return df
 
 
 def refresh_hist_cache(codes: list[str], on_progress=None) -> tuple[int, int]:
     """
-    批量下载并覆盖保存股票历史K线到本地磁盘。
+    批量下载并保存股票历史K线到数据库。
 
     Args:
         codes: 需要缓存的股票代码列表
@@ -157,7 +123,6 @@ def refresh_hist_cache(codes: list[str], on_progress=None) -> tuple[int, int]:
     Returns:
         (成功数量, 失败数量)
     """
-    os.makedirs(HIST_CACHE_DIR, exist_ok=True)
     _bs_login()  # 确保连接在批量开始前是活跃的
     success, errors = 0, 0
     total = len(codes)
@@ -168,7 +133,7 @@ def refresh_hist_cache(codes: list[str], on_progress=None) -> tuple[int, int]:
         try:
             df = _fetch_history_from_api(code, days=60)
             if not df.empty:
-                save_hist_to_disk(code, df)
+                db_manager.save_stock_history(code, df)
                 _hist_cache[code] = df  # 同时更新内存缓存
                 success += 1
             else:

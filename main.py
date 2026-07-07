@@ -38,9 +38,10 @@ import pandas as pd
 from data_engine import (
     login, logout, get_stock_history, clear_hist_cache,
     add_indicators, generate_signals, get_market_snapshot, get_realtime_quotes,
-    get_all_stock_codes, get_cached_stock_codes, load_hist_from_disk, refresh_hist_cache,
+    get_all_stock_codes, get_cached_stock_codes, refresh_hist_cache,
 )
 from trading_engine import Portfolio
+import db_manager
 
 console = Console()
 
@@ -58,12 +59,6 @@ DEFAULT_WATCHLIST = [
 
 WATCHLIST_FILE = "watchlist.txt"
 PORTFOLIO_INITIAL = 1_000_000.0
-
-# ═════════════════════════════════════════════════════════════════════════
-# 股票选股模块配置
-# ═════════════════════════════════════════════════════════════════════════
-
-STOCK_PICKER_CONFIG = "stock_picker_config.json"
 
 # A股备用扩展池 - 当自选股数量不足时补充候选股票
 # 注意：选股时会优先使用自选股 + filter配置中的pool字段
@@ -102,16 +97,12 @@ A_SHARE_POOL = [
 
 
 def load_watchlist() -> list[str]:
-    if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE) as f:
-            codes = [line.strip() for line in f if line.strip()]
-        return codes or DEFAULT_WATCHLIST[:]
-    return DEFAULT_WATCHLIST[:]
+    codes = db_manager.load_watchlist()
+    return codes if codes else DEFAULT_WATCHLIST[:]
 
 
 def save_watchlist(codes: list[str]):
-    with open(WATCHLIST_FILE, "w") as f:
-        f.write("\n".join(codes))
+    db_manager.save_watchlist(codes)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -119,11 +110,9 @@ def save_watchlist(codes: list[str]):
 # ─────────────────────────────────────────────────────────────────────────
 
 def load_picker_config() -> dict:
-    """加载选股配置文件，如果不存在则返回默认配置"""
-    if os.path.exists(STOCK_PICKER_CONFIG):
-        with open(STOCK_PICKER_CONFIG, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return get_default_picker_config()
+    """加载选股配置，优先从数据库读取，不存在则返回默认配置"""
+    cfg = db_manager.load_config("stock_picker")
+    return cfg if cfg else get_default_picker_config()
 
 
 def get_default_picker_config() -> dict:
@@ -160,9 +149,8 @@ def get_default_picker_config() -> dict:
 
 
 def save_picker_config(cfg: dict):
-    """保存选股配置到JSON文件"""
-    with open(STOCK_PICKER_CONFIG, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    """保存选股配置到数据库"""
+    db_manager.save_config("stock_picker", cfg, "选股配置")
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -171,12 +159,12 @@ def save_picker_config(cfg: dict):
 
 def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
     """
-    核心选股引擎 - 使用本地磁盘缓存进行筛选，无需实时网络请求。
+    核心选股引擎 - 使用数据库缓存进行筛选，无需实时网络请求。
 
     处理流程：
     1. pool=None 时自动取所有已缓存股票
-    2. 读磁盘CSV，计算指标并应用筛选
-    3. 仅对通过筛选的少量候选股批量拉取实时欧（取名称+实时价）
+    2. 从数据库读取K线，计算指标并应用筛选
+    3. 仅对通过筛选的少量候选股批量拉取实时行情（取名称+实时价）
     """
     if not pool:
         pool = get_cached_stock_codes()
@@ -186,9 +174,9 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
     candidates = []
 
     for code in pool:
-        # 读磁盘缓存（毫秒级，不发网络请求）
-        df_hist = load_hist_from_disk(code)
-        if df_hist is None or len(df_hist) < 2:
+        # 从数据库读取缓存
+        df_hist = get_stock_history(code)
+        if df_hist is None or df_hist.empty or len(df_hist) < 2:
             continue
 
         try:
@@ -431,10 +419,19 @@ def menu_stock_picker(watchlist: list[str]):
         Prompt.ask("\n按 Enter 返回")
         return
 
-    # 从 filters 目录读取预设条件
+    # 从数据库或文件读取预设条件
     filters_dir = "filters"
     preset_configs = {}
-    if os.path.exists(filters_dir):
+    # 尝试从数据库读取
+    try:
+        for i in range(1, 20):
+            cfg = db_manager.load_config(f"filter_0{i}" if i < 10 else f"filter_{i}")
+            if cfg:
+                preset_configs[str(i)] = {"config": cfg, "name": cfg.get("name", f"Preset {i}")}
+    except Exception:
+        pass
+    # 如果数据库没有，回退到文件
+    if not preset_configs and os.path.exists(filters_dir):
         for idx, filename in enumerate(sorted(f for f in os.listdir(filters_dir) if f.endswith(".json")), 1):
             try:
                 with open(os.path.join(filters_dir, filename), "r", encoding="utf-8") as f:
@@ -498,21 +495,11 @@ def menu_stock_picker(watchlist: list[str]):
 
 
 def menu_cache_manager():
-    """缓存管理菜单 - 下载/刷新所有A股历史数据到本地"""
+    """缓存管理菜单 - 下载/刷新所有A股历史数据到数据库"""
     console.print("\n[bold cyan]=== 股票数据缓存管理 ===[/]")
 
     cached = get_cached_stock_codes()
-    console.print(f"[dim]本地已缓存: [bold]{len(cached)}[/] 只股票[/]")
-    if cached:
-        # 显示最近一次修改的时间
-        latest_mtime = 0.0
-        cache_dir = "cache/hist"
-        for fname in os.listdir(cache_dir) if os.path.exists(cache_dir) else []:
-            p = os.path.join(cache_dir, fname)
-            latest_mtime = max(latest_mtime, os.path.getmtime(p))
-        if latest_mtime:
-            last_upd = datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d %H:%M")
-            console.print(f"[dim]最近更新: {last_upd}[/]")
+    console.print(f"[dim]数据库已缓存: [bold]{len(cached)}[/] 只股票[/]")
 
     console.print("\n  [1] 补全缺失 (只下载还没有缓存的股票)")
     console.print("  [2] 刷新全部 (重新下载所有A股数据)")
@@ -980,6 +967,14 @@ def menu_analysis(watchlist: list[str]):
 # ── Main loop ────────────────────────────────────────────────────
 
 def main():
+    # Initialize database tables
+    try:
+        db_manager.init_database()
+    except Exception as e:
+        console.print(f"[bold red]数据库连接失败: {e}[/]")
+        console.print("[yellow]请确保MySQL已启动，并运行 migrate_to_db.py 迁移数据[/]")
+        return
+
     login()
 
     watchlist = load_watchlist()
