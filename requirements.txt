@@ -1,2 +1,4 @@
 pymysql>=1.1.0
 cryptography>=41.0.0
+baostock>=0.8.8
+rich>=13.0.0

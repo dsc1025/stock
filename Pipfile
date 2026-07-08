@@ -6,6 +6,8 @@ name = "pypi"
 [packages]
 pymysql = "*"
 cryptography = "*"
+baostock = "*"
+rich = "*"
 
 [dev-packages]
 

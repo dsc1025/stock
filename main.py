@@ -26,7 +26,6 @@ from rich.progress import (
     Progress, SpinnerColumn, BarColumn,
     TextColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn,
 )
-import pandas as pd
 
 from data_engine import (
     login, logout, get_stock_history, clear_hist_cache, update_hist_cache,
@@ -224,7 +223,9 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             low_       = float(last["low"] or price)
             turnover   = float(last["turn"] or 0)
             pct_change = float(last["pctChg"] or 0)
-            amplitude  = (high_ - low_) / open_ * 100 if open_ > 0 else 0
+            # 振幅：(最高价-最低价)/前收*100，与通达信口径一致
+            prev_close = float(prev["close"] or open_) if prev is not last else open_
+            amplitude  = (high_ - low_) / prev_close * 100 if prev_close > 0 else 0
             volume     = float(last["volume"] or 0)
 
             rsi = float(last["RSI14"] or 50)
@@ -651,16 +652,21 @@ def make_watchlist_table(snapshots: list[dict]) -> Table:
 
 
 def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, realtime_pct: float = 0) -> Panel:
-    df = get_stock_history(code, days=120)
-    if df.empty:
+    rows = get_stock_history(code, days=120)
+    if not rows:
         return Panel(f"[red]无法获取 {code} 历史数据[/]", title="分析")
 
-    df = add_indicators(df) if "RSI14" not in df.columns else df  # compute only if missing
-    last = df.iloc[-1]
-    signals = generate_signals(df)
+    # compute indicators only if missing
+    rows = add_indicators(rows) if "RSI14" not in rows[-1] else rows
+    last = rows[-1]
+    signals = generate_signals(rows)
     
     current = realtime_price
     current_pct = realtime_pct
+
+    def _ok(v):
+        """Return True if value is not None (replaces pd.notna)."""
+        return v is not None
 
     # Stats grid
     stats = Table.grid(expand=True)
@@ -674,30 +680,31 @@ def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, re
     stats.add_row(
         stat("实时价格", f"¥{current:.2f}"),
         stat("涨跌幅", color_pct(current_pct)),
-        stat("成交额", f"¥{last['amount']/1e8:.2f}亿"),
-        stat("换手率", f"{last['turn']:.2f}%") if pd.notna(last.get("turn")) else "",
+        stat("成交额", f"¥{last['amount']/1e8:.2f}亿" if _ok(last.get("amount")) else "N/A"),
+        stat("换手率", f"{last['turn']:.2f}%" if _ok(last.get("turn")) else "N/A"),
     )
     stats.add_row(
-        stat("MA5", f"¥{last['MA5']:.2f}" if pd.notna(last.get("MA5")) else "N/A"),
-        stat("MA10", f"¥{last['MA10']:.2f}" if pd.notna(last.get("MA10")) else "N/A"),
-        stat("MA20", f"¥{last['MA20']:.2f}" if pd.notna(last.get("MA20")) else "N/A"),
-        stat("MA60", f"¥{last['MA60']:.2f}" if pd.notna(last.get("MA60")) else "N/A"),
+        stat("MA5", f"¥{last['MA5']:.2f}" if _ok(last.get("MA5")) else "N/A"),
+        stat("MA10", f"¥{last['MA10']:.2f}" if _ok(last.get("MA10")) else "N/A"),
+        stat("MA20", f"¥{last['MA20']:.2f}" if _ok(last.get("MA20")) else "N/A"),
+        stat("MA60", f"¥{last['MA60']:.2f}" if _ok(last.get("MA60")) else "N/A"),
     )
     stats.add_row(
-        stat("RSI14", f"{last['RSI14']:.1f}" if pd.notna(last.get("RSI14")) else "N/A"),
-        stat("MACD", f"{last['MACD']:.4f}" if pd.notna(last.get("MACD")) else "N/A"),
-        stat("KDJ-K", f"{last['K']:.1f}" if pd.notna(last.get("K")) else "N/A"),
-        stat("ATR14", f"¥{last['ATR14']:.2f}" if pd.notna(last.get("ATR14")) else "N/A"),
+        stat("RSI14", f"{last['RSI14']:.1f}" if _ok(last.get("RSI14")) else "N/A"),
+        stat("MACD", f"{last['MACD']:.4f}" if _ok(last.get("MACD")) else "N/A"),
+        stat("KDJ-K", f"{last['K']:.1f}" if _ok(last.get("K")) else "N/A"),
+        stat("ATR14", f"¥{last['ATR14']:.2f}" if _ok(last.get("ATR14")) else "N/A"),
     )
     stats.add_row(
-        stat("布林上轨", f"¥{last['BB_UP']:.2f}" if pd.notna(last.get("BB_UP")) else "N/A"),
-        stat("布林中轨", f"¥{last['BB_MID']:.2f}" if pd.notna(last.get("BB_MID")) else "N/A"),
-        stat("布林下轨", f"¥{last['BB_LO']:.2f}" if pd.notna(last.get("BB_LO")) else "N/A"),
-        stat("历史收盘", f"¥{last['close']:.2f}" if pd.notna(last.get("close")) else "N/A"),
+        stat("布林上轨", f"¥{last['BB_UP']:.2f}" if _ok(last.get("BB_UP")) else "N/A"),
+        stat("布林中轨", f"¥{last['BB_MID']:.2f}" if _ok(last.get("BB_MID")) else "N/A"),
+        stat("布林下轨", f"¥{last['BB_LO']:.2f}" if _ok(last.get("BB_LO")) else "N/A"),
+        stat("历史收盘", f"¥{last['close']:.2f}" if _ok(last.get("close")) else "N/A"),
     )
 
     # Mini chart (price sparkline)
-    chart = _sparkline(df["close"].tail(30).tolist())
+    close_list = [r["close"] for r in rows[-30:] if r.get("close") is not None]
+    chart = _sparkline(close_list)
 
     # Signals
     sig_text = "\n".join(f"  • {s}" for s in signals) if signals else "  暂无明显信号"
@@ -804,7 +811,7 @@ def main():
         db_manager.init_database()
     except Exception as e:
         console.print(f"[bold red]数据库连接失败: {e}[/]")
-        console.print("[yellow]请确保MySQL已启动，并运行 migrate_to_db.py 迁移数据[/]")
+        console.print("[yellow]请确保MySQL已启动，并检查 db_config.py 中的连接配置（主机/端口/用户名/密码/库名）[/]")
         return
 
     login()
