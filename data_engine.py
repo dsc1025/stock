@@ -100,7 +100,7 @@ def _fetch_history_from_api(code: str, days: int = 120) -> list[dict]:
     start = (datetime.today() - timedelta(days=days + 30)).strftime("%Y-%m-%d")
     rs = bs.query_history_k_data_plus(
         code,
-        "date,open,high,low,close,volume,amount,turn,pctChg",
+        "date,open,high,low,close,preclose,volume,amount,turn,pctChg",
         start_date=start,
         end_date=end,
         frequency="d",
@@ -110,16 +110,23 @@ def _fetch_history_from_api(code: str, days: int = 120) -> list[dict]:
     while rs.error_code == "0" and rs.next():
         r = rs.get_row_data()
         try:
+            preclose = float(r[5]) if r[5] else None
+            high_v   = float(r[2]) if r[2] else None
+            low_v    = float(r[3]) if r[3] else None
+            # 振幅 = (最高-最低)/前收×100
+            amplitude = ((high_v - low_v) / preclose * 100) if (preclose and high_v is not None and low_v is not None) else None
             row = {
                 "date": r[0],
                 "open": float(r[1]) if r[1] else None,
-                "high": float(r[2]) if r[2] else None,
-                "low": float(r[3]) if r[3] else None,
+                "high": high_v,
+                "low": low_v,
                 "close": float(r[4]) if r[4] else None,
-                "volume": float(r[5]) if r[5] else 0.0,
-                "amount": float(r[6]) if r[6] else 0.0,
-                "turn": float(r[7]) if r[7] else 0.0,
-                "pctChg": float(r[8]) if r[8] else 0.0,
+                "preclose": preclose,
+                "volume": float(r[6]) if r[6] else 0.0,
+                "amount": float(r[7]) if r[7] else 0.0,
+                "turn": float(r[8]) if r[8] else 0.0,
+                "pctChg": float(r[9]) if r[9] else 0.0,
+                "amplitude": amplitude,
             }
         except (ValueError, IndexError):
             continue
@@ -438,7 +445,9 @@ def get_realtime_quotes(codes: list[str]) -> list[dict]:
 
     During trading hours returns live price; outside hours returns last close.
     Returns list of dicts with keys:
-      code, name, open, high, low, close, prev_close, volume, amount, pctChg, time
+      code, name, open, high, low, close, prev_close, volume, amount,
+      pctChg, amplitude, time
+    amplitude = (high - low) / prev_close * 100 — 日内振幅，T+0 核心参数
     Stocks that fail to parse are silently skipped.
     """
     if not codes:
@@ -475,6 +484,7 @@ def get_realtime_quotes(codes: list[str]) -> list[dict]:
             volume     = float(fields[8])  if fields[8]  else 0.0  # shares
             amount     = float(fields[9])  if fields[9]  else 0.0  # yuan
             pct_chg    = (current - prev_close) / prev_close * 100 if prev_close else 0.0
+            amplitude  = (high - low) / prev_close * 100 if prev_close else 0.0
             time_str   = fields[31] if len(fields) > 31 else ""
         except (ValueError, IndexError):
             continue
@@ -490,6 +500,7 @@ def get_realtime_quotes(codes: list[str]) -> list[dict]:
             "volume":     volume,
             "amount":     amount,
             "pctChg":     pct_chg,
+            "amplitude":  amplitude,
             "time":       time_str,
         })
     return result

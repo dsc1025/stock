@@ -234,9 +234,7 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             low_       = float(last["low"] or price)
             turnover   = float(last["turn"] or 0)
             pct_change = float(last["pctChg"] or 0)
-            # 振幅：(最高价-最低价)/前收*100，与通达信口径一致
-            prev_close = float(prev["close"] or open_) if prev is not last else open_
-            amplitude  = (high_ - low_) / prev_close * 100 if prev_close > 0 else 0
+            amplitude  = float(last.get("amplitude") or 0)
             volume     = float(last["volume"] or 0)
 
             rsi = float(last["RSI14"] or 50)
@@ -441,6 +439,8 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
                 if rt.get("close", 0) > 0:
                     c["price"] = rt["close"]
                     c["pct_change"] = rt.get("pctChg", c["pct_change"])
+                if rt.get("amplitude", 0) > 0:
+                    c["amplitude"] = rt["amplitude"]
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates
@@ -456,23 +456,23 @@ def make_picker_table(candidates: list[dict]) -> Table:
         title="[bold cyan]选股结果[/]",
         box=box.SIMPLE_HEAVY,
         header_style="bold magenta",
-        show_lines=True,
+        show_lines=False,
     )
     
     t.add_column("代码", style="cyan", width=8)
-    t.add_column("名称", width=10)
+    t.add_column("名称", width=14)
     t.add_column("价格", justify="right", width=8)
-    t.add_column("涨幅", justify="right", width=8)
-    t.add_column("换手", justify="right", width=8)
-    t.add_column("振幅", justify="right", width=8)
-    t.add_column("RSI", justify="right", width=6)
-    t.add_column("K值", justify="right", width=6)
-    t.add_column("MACD", justify="center", width=6)
-    t.add_column("MA20", justify="center", width=6)
-    t.add_column("MA60", justify="center", width=6)
-    t.add_column("均振幅", justify="right", width=8)
-    t.add_column("均换手", justify="right", width=8)
-    t.add_column("评分", justify="right", width=8)
+    t.add_column("涨幅", justify="right", width=7)
+    t.add_column("换手", justify="right", width=7)
+    t.add_column("振幅", justify="right", width=7)
+    t.add_column("RSI", justify="right", width=5)
+    t.add_column("K值", justify="right", width=5)
+    t.add_column("MACD", justify="center", width=5)
+    t.add_column("MA20", justify="center", width=5)
+    t.add_column("MA60", justify="center", width=5)
+    t.add_column("均振幅", justify="right", width=10)
+    t.add_column("均换手", justify="right", width=10)
+    t.add_column("评分", justify="right", width=7)
     
     for c in candidates:
         macd_mark = "✓" if c["macd_positive"] else "✗"
@@ -658,15 +658,17 @@ def make_watchlist_table(snapshots: list[dict]) -> Table:
         title="[bold cyan]实时行情[/]",
         box=box.SIMPLE_HEAVY,
         header_style="bold magenta",
-        show_lines=True,
+        show_lines=False,
     )
-    t.add_column("代码", style="cyan", width=12)
-    t.add_column("名称", width=12)
-    t.add_column("最新价", justify="right", width=10)
-    t.add_column("涨跌幅", justify="right", width=10)
-    t.add_column("开盘", justify="right", width=10)
-    t.add_column("最高", justify="right", width=10)
-    t.add_column("最低", justify="right", width=10)
+    t.add_column("代码", style="cyan", width=10)
+    t.add_column("名称", width=14)
+    t.add_column("最新价", justify="right", width=9)
+    t.add_column("涨跌幅", justify="right", width=8)
+    t.add_column("开盘", justify="right", width=9)
+    t.add_column("最高", justify="right", width=9)
+    t.add_column("最低", justify="right", width=9)
+    t.add_column("振幅", justify="right", width=7)
+    t.add_column("换手率", justify="right", width=7)
     t.add_column("成交量(手)", justify="right", width=12)
 
     for s in snapshots:
@@ -680,12 +682,14 @@ def make_watchlist_table(snapshots: list[dict]) -> Table:
             f"¥{s['open']:.2f}",
             f"¥{s['high']:.2f}",
             f"¥{s['low']:.2f}",
+            f"{s.get('amplitude', 0):.2f}%",
+            "",  # 换手率：新浪不提供，留空
             f"{int(s['volume']/100):,}",
         )
     return t
 
 
-def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, realtime_pct: float = 0) -> Panel:
+def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, realtime_pct: float = 0, realtime_amplitude: float = 0) -> Panel:
     rows = get_stock_history(code, days=120)
     if not rows:
         return Panel(f"[red]无法获取 {code} 历史数据[/]", title="分析")
@@ -714,26 +718,33 @@ def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, re
     stats.add_row(
         stat("实时价格", f"¥{current:.2f}"),
         stat("涨跌幅", color_pct(current_pct)),
-        stat("成交额", f"¥{last['amount']/1e8:.2f}亿" if _ok(last.get("amount")) else "N/A"),
+        stat("振幅", f"{realtime_amplitude:.2f}%" if realtime_amplitude else (
+            f"{last.get('amplitude', 0):.2f}%" if _ok(last.get("amplitude")) else "N/A")),
         stat("换手率", f"{last['turn']:.2f}%" if _ok(last.get("turn")) else "N/A"),
     )
     stats.add_row(
+        stat("成交额", f"¥{last['amount']/1e8:.2f}亿" if _ok(last.get("amount")) else "N/A"),
         stat("MA5", f"¥{last['MA5']:.2f}" if _ok(last.get("MA5")) else "N/A"),
         stat("MA10", f"¥{last['MA10']:.2f}" if _ok(last.get("MA10")) else "N/A"),
         stat("MA20", f"¥{last['MA20']:.2f}" if _ok(last.get("MA20")) else "N/A"),
-        stat("MA60", f"¥{last['MA60']:.2f}" if _ok(last.get("MA60")) else "N/A"),
     )
     stats.add_row(
+        stat("MA60", f"¥{last['MA60']:.2f}" if _ok(last.get("MA60")) else "N/A"),
         stat("RSI14", f"{last['RSI14']:.1f}" if _ok(last.get("RSI14")) else "N/A"),
         stat("MACD", f"{last['MACD']:.4f}" if _ok(last.get("MACD")) else "N/A"),
         stat("KDJ-K", f"{last['K']:.1f}" if _ok(last.get("K")) else "N/A"),
-        stat("ATR14", f"¥{last['ATR14']:.2f}" if _ok(last.get("ATR14")) else "N/A"),
     )
     stats.add_row(
+        stat("ATR14", f"¥{last['ATR14']:.2f}" if _ok(last.get("ATR14")) else "N/A"),
         stat("布林上轨", f"¥{last['BB_UP']:.2f}" if _ok(last.get("BB_UP")) else "N/A"),
         stat("布林中轨", f"¥{last['BB_MID']:.2f}" if _ok(last.get("BB_MID")) else "N/A"),
         stat("布林下轨", f"¥{last['BB_LO']:.2f}" if _ok(last.get("BB_LO")) else "N/A"),
+    )
+    stats.add_row(
         stat("历史收盘", f"¥{last['close']:.2f}" if _ok(last.get("close")) else "N/A"),
+        stat("", ""),
+        stat("", ""),
+        stat("", ""),
     )
 
     # Mini chart (price sparkline)
@@ -832,7 +843,7 @@ def menu_analysis(watchlist: list[str]):
         console.print("[red]无法获取行情数据[/]")
         Prompt.ask("\n按 Enter 返回")
         return
-    panel = make_analysis_panel(code, rt[0]["name"], rt[0]["close"], rt[0]["pctChg"])
+    panel = make_analysis_panel(code, rt[0]["name"], rt[0]["close"], rt[0]["pctChg"], rt[0].get("amplitude", 0))
     console.print(panel)
     Prompt.ask("\n按 Enter 返回")
 
@@ -843,6 +854,10 @@ def main():
     # Initialize database tables
     try:
         db_manager.init_database()
+        # Backfill amplitude for existing rows that lack it
+        n = db_manager.backfill_amplitude()
+        if n > 0:
+            console.print(f"[dim]已回填 {n} 条历史振幅数据[/]")
     except Exception as e:
         console.print(f"[bold red]数据库连接失败: {e}[/]")
         console.print("[yellow]请确保MySQL已启动，并检查 db_config.py 中的连接配置（主机/端口/用户名/密码/库名）[/]")

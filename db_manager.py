@@ -15,10 +15,12 @@ CREATE TABLE IF NOT EXISTS stock_history (
     high DECIMAL(10,2),
     low DECIMAL(10,2),
     close DECIMAL(10,2),
+    preclose DECIMAL(10,2),
     volume BIGINT,
     amount DECIMAL(18,2),
     turn DECIMAL(8,4),
     pctChg DECIMAL(8,4),
+    amplitude DECIMAL(8,4),
     MA5 DECIMAL(10,2),
     MA10 DECIMAL(10,2),
     MA20 DECIMAL(10,2),
@@ -91,6 +93,12 @@ def init_database():
                     cur.execute(f"ALTER TABLE stock_history ADD COLUMN {col_def}")
                 except Exception:
                     pass
+            # Migrate: add preclose and amplitude columns
+            for col_def in ["preclose DECIMAL(10,2)", "amplitude DECIMAL(8,4)"]:
+                try:
+                    cur.execute(f"ALTER TABLE stock_history ADD COLUMN {col_def}")
+                except Exception:
+                    pass
             # Drop redundant indexes
             for drop_idx in [
                 "DROP INDEX idx_code ON stock_history",
@@ -100,6 +108,54 @@ def init_database():
                     cur.execute(drop_idx)
                 except Exception:
                     pass
+
+
+def backfill_amplitude():
+    """Backfill amplitude column for existing rows that lack it.
+
+    amplitude = (high - low) / prev_close * 100, where prev_close is the
+    previous trading day's close (same as baostock's preclose semantics).
+    Only updates rows where amplitude IS NULL.
+    """
+    codes = get_cached_stock_codes()
+    if not codes:
+        return 0
+
+    updated = 0
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for code in codes:
+                # Load all rows for this stock, ordered by date
+                cur.execute(
+                    "SELECT date, high, low, close, amplitude "
+                    "FROM stock_history WHERE code = %s ORDER BY date",
+                    (code,),
+                )
+                rows = cur.fetchall()
+
+                prev_close = None
+                updates: list[tuple[float, str, str]] = []  # (amplitude, code, date)
+                for r in rows:
+                    if r["amplitude"] is not None:
+                        prev_close = float(r["close"] or 0)
+                        continue  # already has amplitude, just track prev_close
+
+                    high_v = float(r["high"] or 0)
+                    low_v = float(r["low"] or 0)
+                    if prev_close is not None and prev_close > 0:
+                        amp = (high_v - low_v) / prev_close * 100
+                        updates.append((amp, code, str(r["date"])[:10]))
+                    prev_close = float(r["close"] or 0)
+
+                if updates:
+                    cur.executemany(
+                        "UPDATE stock_history SET amplitude = %s "
+                        "WHERE code = %s AND date = %s",
+                        updates,
+                    )
+                    updated += len(updates)
+
+    return updated
 
 
 # ── Stock History ───────────────────────────────────────────────────────
@@ -120,8 +176,8 @@ def save_stock_history(code: str, rows: list[dict]):
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cols = ["code", "date", "open", "high", "low", "close",
-                    "volume", "amount", "turn", "pctChg"] + _IND_COLS
+            cols = ["code", "date", "open", "high", "low", "close", "preclose",
+                    "volume", "amount", "turn", "pctChg", "amplitude"] + _IND_COLS
             placeholders = ",".join(["%s"] * len(cols))
             # ON DUPLICATE KEY UPDATE：利用唯一键 uk_code_date(code,date) 去重，
             # 避免每次刷新都 DELETE 全量数据。UPDATE 子句需列出所有非键列。
@@ -137,8 +193,10 @@ def save_stock_history(code: str, rows: list[dict]):
                 row = [
                     code, str(r["date"])[:10],
                     r.get("open"), r.get("high"), r.get("low"), r.get("close"),
+                    r.get("preclose"),
                     r.get("volume", 0), r.get("amount", 0),
                     r.get("turn", 0), r.get("pctChg", 0),
+                    r.get("amplitude"),
                 ]
                 for c in _IND_COLS:
                     row.append(r.get(c))
@@ -151,7 +209,7 @@ def load_stock_history(code: str) -> list[dict] | None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT date, open, high, low, close, volume, amount, turn, pctChg, "
+                "SELECT date, open, high, low, close, volume, amount, turn, pctChg, amplitude, "
                 "MA5, MA10, MA20, MA60, DIF, DEA, MACD, RSI14, "
                 "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
                 "FROM stock_history WHERE code = %s ORDER BY date",
@@ -161,7 +219,7 @@ def load_stock_history(code: str) -> list[dict] | None:
     if not rows:
         return None
     # Convert numeric strings from DB to float/int
-    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg",
+    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg", "amplitude",
                  "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD", "RSI14",
                  "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14"]
     for r in rows:
@@ -188,7 +246,7 @@ def prefilter_codes_by_latest(config_filters: dict) -> list[str] | None:
     """Push simple filters (price, turnover, pct_change, amplitude) to SQL.
 
     Only examines the latest trading day per stock via a subquery join.
-    振幅使用前收盘价(prev_close)作为分母，与通达信口径一致：用 LAG() 取前一交易日收盘。
+    Uses stored amplitude column — MySQL 5.7 compatible (no CTE/LAG).
     Returns a list of codes that pass all enabled simple filters, or None
     if no simple filters are enabled (meaning: caller should load all codes).
     """
@@ -202,11 +260,10 @@ def prefilter_codes_by_latest(config_filters: dict) -> list[str] | None:
             conditions.append("sh.turn BETWEEN %s AND %s")
             params.extend([float(cfg["min"]), float(cfg.get("max", 100))])
         elif key == "amplitude":
-            # 振幅 = (最高-最低)/前收*100，prev_close 来自 CTE 的 LAG(close)
-            conditions.append("(sh.high - sh.low) / NULLIF(sh.prev_close, 0) * 100 >= %s")
+            conditions.append("sh.amplitude >= %s")
             params.append(float(cfg["min"]))
             if "max" in cfg:
-                conditions.append("(sh.high - sh.low) / NULLIF(sh.prev_close, 0) * 100 <= %s")
+                conditions.append("sh.amplitude <= %s")
                 params.append(float(cfg["max"]))
         elif key == "pct_change":
             conditions.append("sh.pctChg BETWEEN %s AND %s")
@@ -218,14 +275,8 @@ def prefilter_codes_by_latest(config_filters: dict) -> list[str] | None:
     if not conditions:
         return None  # no simple filters → caller loads all codes
 
-    # CTE 计算每只股票前一交易日收盘价(prev_close)，再 join 最新交易日行
     sql = (
-        "WITH with_prev AS ("
-        "  SELECT code, date, open, high, low, close, turn, pctChg, "
-        "    LAG(close) OVER (PARTITION BY code ORDER BY date) AS prev_close "
-        "  FROM stock_history"
-        ") "
-        "SELECT sh.code FROM with_prev sh "
+        "SELECT sh.code FROM stock_history sh "
         "INNER JOIN ("
         "  SELECT code, MAX(date) AS max_date FROM stock_history GROUP BY code"
         ") latest ON sh.code = latest.code AND sh.date = latest.max_date "
@@ -246,7 +297,7 @@ def load_stock_history_batch(codes: list[str], days: int = 120) -> dict[str, lis
 
     placeholders = ",".join(["%s"] * len(codes))
     sql = (
-        "SELECT code, date, open, high, low, close, volume, amount, turn, pctChg, "
+        "SELECT code, date, open, high, low, close, volume, amount, turn, pctChg, amplitude, "
         "MA5, MA10, MA20, MA60, DIF, DEA, MACD, RSI14, "
         "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
         "FROM stock_history "
@@ -262,7 +313,7 @@ def load_stock_history_batch(codes: list[str], days: int = 120) -> dict[str, lis
     if not rows:
         return {}
 
-    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg",
+    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg", "amplitude",
                  "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD", "RSI14",
                  "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14"]
 
@@ -292,22 +343,19 @@ def load_latest_indicators_batch(codes: list[str]) -> dict[str, dict]:
     """Load the LATEST TWO rows (with pre-computed indicators) for multiple stocks.
 
     Returns dict[code] = {"last": {...}, "prev": {...}}
-    Uses MySQL window function ROW_NUMBER() for efficiency.
-    No pandas needed — returns plain dicts from the cursor.
+    MySQL 5.7 compatible — loads all rows and filters in Python (fast enough for
+    typical usage; each stock contributes only 2 rows to the result).
     """
     if not codes:
         return {}
 
     placeholders = ",".join(["%s"] * len(codes))
     sql = (
-        "SELECT code, date, open, high, low, close, volume, amount, turn, pctChg, "
+        "SELECT code, date, open, high, low, close, volume, amount, turn, pctChg, amplitude, "
         "MA5, MA10, MA20, MA60, DIF, DEA, MACD, RSI14, "
         "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
-        "FROM ("
-        "  SELECT *, ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn "
-        "  FROM stock_history "
-        f" WHERE code IN ({placeholders})"
-        ") t WHERE rn <= 2 "
+        "FROM stock_history "
+        f"WHERE code IN ({placeholders}) "
         "ORDER BY code, date DESC"
     )
 
@@ -320,11 +368,10 @@ def load_latest_indicators_batch(codes: list[str]) -> dict[str, dict]:
     for r in rows:
         code = r["code"]
         if code not in result:
-            # 首次遇到该 code —— 因为 ORDER BY date DESC，这是最新行(last)
             result[code] = {"last": r, "prev": None}
-        else:
-            # 第二次遇到 —— 是上一交易日(prev)
+        elif result[code]["prev"] is None:
             result[code]["prev"] = r
+        # else: already have 2 rows for this code, skip
 
     return result
 
@@ -334,35 +381,41 @@ def get_avg_volume_batch(codes: list[str], days: int = 5) -> dict[str, float]:
     if not codes:
         return {}
     placeholders = ",".join(["%s"] * len(codes))
-    # Use window function to get last N rows per code efficiently
     sql = (
-        "SELECT code, AVG(volume) AS avg_vol FROM ("
-        "  SELECT code, volume, "
-        "    ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn "
-        "  FROM stock_history "
-        f" WHERE code IN ({placeholders})"
-        f") t WHERE rn <= {days} "
-        "GROUP BY code"
+        "SELECT code, volume FROM stock_history "
+        f"WHERE code IN ({placeholders}) "
+        "ORDER BY code, date"
     )
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, codes)
-            return {r["code"]: float(r["avg_vol"] or 0) for r in cur.fetchall()}
+            rows = cur.fetchall()
+
+    # Group by code, take last N days, compute average
+    from collections import defaultdict
+    code_data: dict[str, list[int]] = defaultdict(list)
+    for r in rows:
+        code_data[r["code"]].append(int(r["volume"] or 0))
+
+    result: dict[str, float] = {}
+    for code, vols in code_data.items():
+        recent = vols[-days:] if len(vols) > days else vols
+        result[code] = sum(recent) / len(recent) if recent else 0.0
+    return result
 
 
 def get_avg_amplitude_turnover_batch(codes: list[str], days: int = 120) -> dict[str, dict]:
     """Compute N-day average amplitude and average turnover for each code.
 
-    Amplitude = (high - low) / prev_close * 100.
-    MySQL 5.7 compatible — no CTE/window functions. Loads raw rows and
-    computes averages in Python. Returns {code: {"avg_amplitude": float, "avg_turnover": float}}.
+    Uses stored amplitude column. MySQL 5.7 compatible.
+    Returns {code: {"avg_amplitude": float, "avg_turnover": float}}.
     """
     if not codes:
         return {}
 
     placeholders = ",".join(["%s"] * len(codes))
     sql = (
-        "SELECT code, date, high, low, close, turn "
+        "SELECT code, amplitude, turn "
         "FROM stock_history "
         f"WHERE code IN ({placeholders}) "
         "ORDER BY code, date"
@@ -373,35 +426,26 @@ def get_avg_amplitude_turnover_batch(codes: list[str], days: int = 120) -> dict[
             cur.execute(sql, codes)
             rows = cur.fetchall()
 
-    # Group by code
+    # Group by code, take last N days, compute averages
     from collections import defaultdict
     code_data: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         code_data[r["code"]].append({
-            "high": float(r["high"] or 0),
-            "low": float(r["low"] or 0),
-            "close": float(r["close"] or 0),
+            "amplitude": float(r["amplitude"] or 0),
             "turn": float(r["turn"] or 0),
         })
 
     result: dict[str, dict] = {}
+    min_required = max(days // 2, 20)  # at least half the period, floor 20 trading days
     for code, data in code_data.items():
-        # Take only the last N days
+        if len(data) < min_required:
+            continue  # insufficient history, skip
         recent = data[-days:] if len(data) > days else data
-
-        amplitudes: list[float] = []
-        turnovers: list[float] = []
-        prev_close: float | None = None
-        for row in recent:
-            if prev_close is not None and prev_close > 0:
-                amp = (row["high"] - row["low"]) / prev_close * 100
-                amplitudes.append(amp)
-            turnovers.append(row["turn"])
-            prev_close = row["close"]
-
+        amps = [d["amplitude"] for d in recent if d["amplitude"] is not None and d["amplitude"] > 0]
+        turns = [d["turn"] for d in recent]
         result[code] = {
-            "avg_amplitude": sum(amplitudes) / len(amplitudes) if amplitudes else 0.0,
-            "avg_turnover": sum(turnovers) / len(turnovers) if turnovers else 0.0,
+            "avg_amplitude": sum(amps) / len(amps) if amps else 0.0,
+            "avg_turnover": sum(turns) / len(turns) if turns else 0.0,
         }
 
     return result
