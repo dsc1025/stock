@@ -350,6 +350,63 @@ def get_avg_volume_batch(codes: list[str], days: int = 5) -> dict[str, float]:
             return {r["code"]: float(r["avg_vol"] or 0) for r in cur.fetchall()}
 
 
+def get_avg_amplitude_turnover_batch(codes: list[str], days: int = 120) -> dict[str, dict]:
+    """Compute N-day average amplitude and average turnover for each code.
+
+    Amplitude = (high - low) / prev_close * 100.
+    MySQL 5.7 compatible — no CTE/window functions. Loads raw rows and
+    computes averages in Python. Returns {code: {"avg_amplitude": float, "avg_turnover": float}}.
+    """
+    if not codes:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(codes))
+    sql = (
+        "SELECT code, date, high, low, close, turn "
+        "FROM stock_history "
+        f"WHERE code IN ({placeholders}) "
+        "ORDER BY code, date"
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, codes)
+            rows = cur.fetchall()
+
+    # Group by code
+    from collections import defaultdict
+    code_data: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        code_data[r["code"]].append({
+            "high": float(r["high"] or 0),
+            "low": float(r["low"] or 0),
+            "close": float(r["close"] or 0),
+            "turn": float(r["turn"] or 0),
+        })
+
+    result: dict[str, dict] = {}
+    for code, data in code_data.items():
+        # Take only the last N days
+        recent = data[-days:] if len(data) > days else data
+
+        amplitudes: list[float] = []
+        turnovers: list[float] = []
+        prev_close: float | None = None
+        for row in recent:
+            if prev_close is not None and prev_close > 0:
+                amp = (row["high"] - row["low"]) / prev_close * 100
+                amplitudes.append(amp)
+            turnovers.append(row["turn"])
+            prev_close = row["close"]
+
+        result[code] = {
+            "avg_amplitude": sum(amplitudes) / len(amplitudes) if amplitudes else 0.0,
+            "avg_turnover": sum(turnovers) / len(turnovers) if turnovers else 0.0,
+        }
+
+    return result
+
+
 # ── Portfolio ───────────────────────────────────────────────────────────
 
 def save_portfolio(data: dict):

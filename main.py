@@ -140,6 +140,8 @@ def _get_default_picker_config() -> dict:
             "price_vs_ma60": {"enabled": False, "relation": "above", "pct": 5.0},
             "atr_ratio": {"enabled": False, "min": 0.5},
             "high_low_ratio": {"enabled": False, "min": 0.8},
+            "avg_amplitude_120": {"enabled": False, "min": 7.0},
+            "avg_turnover_120": {"enabled": False, "min": 2.0},
         },
         "signal_weights": {
             "macd_golden": 2.0,
@@ -203,6 +205,15 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
     if config["filters"].get("volume_rate", {}).get("enabled", False):
         days_n = config["filters"]["volume_rate"].get("days", 5)
         _vol_avg_cache = db_manager.get_avg_volume_batch(codes, days_n)
+
+    # ── Step 2.6: Pre-fetch 120d avg amplitude & avg turnover ──
+    _avg_amp_to_cache: dict[str, dict] = {}
+    need_avg_120 = (
+        config["filters"].get("avg_amplitude_120", {}).get("enabled") or
+        config["filters"].get("avg_turnover_120", {}).get("enabled")
+    )
+    if need_avg_120:
+        _avg_amp_to_cache = db_manager.get_avg_amplitude_turnover_batch(codes, 120)
 
     # ── Step 3: 直接使用预计算指标应用筛选 ──
     candidates = []
@@ -375,6 +386,23 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             if hl < config["filters"]["high_low_ratio"]["min"]:
                 passed = False
             scores["hl_ratio"] = hl
+        # 19 120日均振幅
+        avg_amp_120 = 0.0
+        avg_turn_120 = 0.0
+        if need_avg_120:
+            entry = _avg_amp_to_cache.get(code)
+            if entry:
+                avg_amp_120 = entry["avg_amplitude"]
+                avg_turn_120 = entry["avg_turnover"]
+        if _chk("avg_amplitude_120"):
+            if avg_amp_120 < config["filters"]["avg_amplitude_120"]["min"]:
+                passed = False
+            scores["avg_amp_120"] = avg_amp_120 / 7.0  # normalize to ~1.0 at 7%
+        # 20 120日均换手率
+        if _chk("avg_turnover_120"):
+            if avg_turn_120 < config["filters"]["avg_turnover_120"]["min"]:
+                passed = False
+            scores["avg_turn_120"] = min(avg_turn_120 / 2.0, 2.0)
 
         if not passed:
             continue
@@ -399,6 +427,8 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             "price_above_ma20": price > ma20,
             "price_above_ma60": price > ma60,
             "score": score,
+            "avg_amplitude_120": avg_amp_120,
+            "avg_turnover_120": avg_turn_120,
         })
 
     # 仅对通过筛选的少量候选股，批量获取实时行情（取名称+实时价）
@@ -440,6 +470,8 @@ def make_picker_table(candidates: list[dict]) -> Table:
     t.add_column("MACD", justify="center", width=6)
     t.add_column("MA20", justify="center", width=6)
     t.add_column("MA60", justify="center", width=6)
+    t.add_column("均振幅", justify="right", width=8)
+    t.add_column("均换手", justify="right", width=8)
     t.add_column("评分", justify="right", width=8)
     
     for c in candidates:
@@ -459,6 +491,8 @@ def make_picker_table(candidates: list[dict]) -> Table:
             macd_mark,
             ma20_mark,
             ma60_mark,
+            f"{c.get('avg_amplitude_120', 0):.1f}%",
+            f"{c.get('avg_turnover_120', 0):.1f}%",
             f"{c['score']:.1f}",
         )
     

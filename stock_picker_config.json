@@ -96,6 +96,16 @@
       "enabled": false,
       "min": 0.8,
       "description": "最低价/最高价比值 - >0.8表示低点明显高于高点，说明有强势反弹，具有反弹潜力"
+    },
+    "avg_amplitude_120": {
+      "enabled": false,
+      "min": 7.0,
+      "description": "120日均振幅(%) — 近120个交易日 (最高-最低)/前收×100 的平均值。>7%表示高波动股"
+    },
+    "avg_turnover_120": {
+      "enabled": false,
+      "min": 2.0,
+      "description": "120日均换手率(%) — 近120个交易日日均换手率。>2%表示持续活跃"
     }
   },
   "signal_weights": {
