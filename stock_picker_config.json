@@ -114,5 +114,6 @@
     "kdj_cross": 1.2,
     "volume": 0.8
   },
+  "lookback_days": 120,
   "max_results": 20
 }

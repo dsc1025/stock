@@ -149,6 +149,7 @@ def _get_default_picker_config() -> dict:
             "kdj_cross": 1.2,
             "volume": 0.8,
         },
+        "lookback_days": 120,
     }
 
 
@@ -206,14 +207,11 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
         days_n = config["filters"]["volume_rate"].get("days", 5)
         _vol_avg_cache = db_manager.get_avg_volume_batch(codes, days_n)
 
-    # ── Step 2.6: Pre-fetch 120d avg amplitude & avg turnover ──
+    # ── Step 2.6: Pre-fetch rolling avg amplitude & avg turnover ──
     _avg_amp_to_cache: dict[str, dict] = {}
-    need_avg_120 = (
-        config["filters"].get("avg_amplitude_120", {}).get("enabled") or
-        config["filters"].get("avg_turnover_120", {}).get("enabled")
-    )
-    if need_avg_120:
-        _avg_amp_to_cache = db_manager.get_avg_amplitude_turnover_batch(codes, 120)
+    lookback = config.get("lookback_days", 120)
+    _avg_amp_to_cache = db_manager.get_avg_amplitude_turnover_batch(codes, lookback)
+    need_avg_120 = True
 
     # ── Step 3: 直接使用预计算指标应用筛选 ──
     candidates = []
@@ -259,7 +257,7 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
         scores: dict[str, float] = {}
 
         def _chk(key: str) -> bool:
-            return config["filters"][key].get("enabled", False)
+            return config["filters"].get(key, {}).get("enabled", False)
 
         # 1 换手率 — SQL 已预筛选，但仍需 double-check（防御性）
         if _chk("turnover"):
@@ -548,6 +546,18 @@ def menu_stock_picker(watchlist: list[str]):
     else:
         console.print("[dim]启用筛选: 基础条件 (换手率、振幅、涨幅、价格)[/]")
 
+    lookback = Prompt.ask(
+        "\n[dim]回溯交易日数[/]",
+        default="60",
+        show_default=True,
+    )
+    try:
+        lookback = int(lookback)
+        lookback = max(lookback, 10)  # minimum 10 trading days
+    except ValueError:
+        lookback = 120
+    config["lookback_days"] = lookback
+
     choice = Prompt.ask(
         "\n[dim](s)开始选股 (q)返回[/]",
         choices=["s", "q"], default="s", show_choices=False,
@@ -555,7 +565,7 @@ def menu_stock_picker(watchlist: list[str]):
     if choice == "q":
         return
 
-    console.print(f"\n[dim]正在筛选 {cached_count} 只股票...[/]")
+    console.print(f"\n[dim]正在筛选 {cached_count} 只股票 ({lookback}日回溯)...[/]")
     candidates = pick_stocks(pool, config)
 
     if not candidates:
