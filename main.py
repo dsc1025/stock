@@ -17,7 +17,6 @@ from typing import Optional, List, Dict
 
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 from rich.text import Text
 from rich.prompt import Prompt, Confirm
 from rich.rule import Rule
@@ -28,8 +27,8 @@ from rich.progress import (
 )
 
 from data_engine import (
-    login, logout, get_stock_history, clear_hist_cache, update_hist_cache,
-    add_indicators, generate_signals, get_market_snapshot, get_realtime_quotes,
+    login, logout, clear_hist_cache, update_hist_cache,
+    get_market_snapshot, get_realtime_quotes,
     get_all_stock_codes, get_cached_stock_codes, refresh_hist_cache,
 )
 import db_manager
@@ -699,98 +698,6 @@ def make_watchlist_table(snapshots: list[dict]) -> Table:
     return t
 
 
-def make_analysis_panel(code: str, name: str = "", realtime_price: float = 0, realtime_pct: float = 0, realtime_amplitude: float = 0) -> Panel:
-    rows = get_stock_history(code, days=120)
-    if not rows:
-        return Panel(f"[red]无法获取 {code} 历史数据[/]", title="分析")
-
-    # compute indicators only if missing
-    rows = add_indicators(rows) if "RSI14" not in rows[-1] else rows
-    last = rows[-1]
-    signals = generate_signals(rows)
-    
-    current = realtime_price
-    current_pct = realtime_pct
-
-    def _ok(v):
-        """Return True if value is not None (replaces pd.notna)."""
-        return v is not None
-
-    # Stats grid
-    stats = Table.grid(expand=True)
-    stats.add_column(ratio=1)
-    stats.add_column(ratio=1)
-    stats.add_column(ratio=1)
-    stats.add_column(ratio=1)
-
-    def stat(label, value): return f"[dim]{label}:[/] [bold]{value}[/]"
-
-    stats.add_row(
-        stat("实时价格", f"¥{current:.2f}"),
-        stat("涨跌幅", color_pct(current_pct)),
-        stat("振幅", f"{realtime_amplitude:.2f}%" if realtime_amplitude else (
-            f"{last.get('amplitude', 0):.2f}%" if _ok(last.get("amplitude")) else "N/A")),
-        stat("换手率", f"{last['turn']:.2f}%" if _ok(last.get("turn")) else "N/A"),
-    )
-    stats.add_row(
-        stat("成交额", f"¥{last['amount']/1e8:.2f}亿" if _ok(last.get("amount")) else "N/A"),
-        stat("MA5", f"¥{last['MA5']:.2f}" if _ok(last.get("MA5")) else "N/A"),
-        stat("MA10", f"¥{last['MA10']:.2f}" if _ok(last.get("MA10")) else "N/A"),
-        stat("MA20", f"¥{last['MA20']:.2f}" if _ok(last.get("MA20")) else "N/A"),
-    )
-    stats.add_row(
-        stat("MA60", f"¥{last['MA60']:.2f}" if _ok(last.get("MA60")) else "N/A"),
-        stat("RSI14", f"{last['RSI14']:.1f}" if _ok(last.get("RSI14")) else "N/A"),
-        stat("MACD", f"{last['MACD']:.4f}" if _ok(last.get("MACD")) else "N/A"),
-        stat("KDJ-K", f"{last['K']:.1f}" if _ok(last.get("K")) else "N/A"),
-    )
-    stats.add_row(
-        stat("ATR14", f"¥{last['ATR14']:.2f}" if _ok(last.get("ATR14")) else "N/A"),
-        stat("布林上轨", f"¥{last['BB_UP']:.2f}" if _ok(last.get("BB_UP")) else "N/A"),
-        stat("布林中轨", f"¥{last['BB_MID']:.2f}" if _ok(last.get("BB_MID")) else "N/A"),
-        stat("布林下轨", f"¥{last['BB_LO']:.2f}" if _ok(last.get("BB_LO")) else "N/A"),
-    )
-    stats.add_row(
-        stat("历史收盘", f"¥{last['close']:.2f}" if _ok(last.get("close")) else "N/A"),
-        stat("", ""),
-        stat("", ""),
-        stat("", ""),
-    )
-
-    # Mini chart (price sparkline)
-    close_list = [r["close"] for r in rows[-30:] if r.get("close") is not None]
-    chart = _sparkline(close_list)
-
-    # Signals
-    sig_text = "\n".join(f"  • {s}" for s in signals) if signals else "  暂无明显信号"
-
-    content = Table.grid(expand=True)
-    content.add_column()
-    content.add_row(stats)
-    content.add_row(f"\n[dim]近30日价格走势:[/] {chart}\n")
-    content.add_row(f"[bold yellow]量化信号:[/]\n{sig_text}")
-
-    return Panel(
-        content,
-        title=f"[bold cyan]深度分析: {name} ({_strip_prefix(code)})[/]",
-        border_style="cyan",
-    )
-
-
-def _sparkline(values: list[float]) -> str:
-    if not values:
-        return ""
-    lo, hi = min(values), max(values)
-    bars = "▁▂▃▄▅▆▇█"
-    if hi == lo:
-        return bars[4] * len(values)
-    result = ""
-    for v in values:
-        idx = int((v - lo) / (hi - lo) * (len(bars) - 1))
-        result += bars[idx]
-    return result
-
-
 # ── Interactive menus ────────────────────────────────────────────
 
 def menu_add_stock(watchlist: list[str]) -> list[str]:
@@ -832,32 +739,6 @@ def menu_remove_stock(watchlist: list[str]) -> list[str]:
     return watchlist
 
 
-def menu_analysis(watchlist: list[str]):
-    for i, code in enumerate(watchlist):
-        console.print(f"  {i+1}. {_strip_prefix(code)}")
-    choice = Prompt.ask("选择分析的股票 (序号或代码)").strip()
-    if choice.isdigit() and len(choice) <= 2:
-        idx = int(choice) - 1
-        if 0 <= idx < len(watchlist):
-            code = watchlist[idx]
-        else:
-            return
-    elif choice.isdigit():
-        code = _auto_prefix(choice)
-    else:
-        code = choice
-
-    console.print(f"\n[dim]正在获取 {code} 数据...[/]")
-    rt = get_realtime_quotes([code])
-    if not rt:
-        console.print("[red]无法获取行情数据[/]")
-        Prompt.ask("\n按 Enter 返回")
-        return
-    panel = make_analysis_panel(code, rt[0]["name"], rt[0]["close"], rt[0]["pctChg"], rt[0].get("amplitude", 0))
-    console.print(panel)
-    Prompt.ask("\n按 Enter 返回")
-
-
 # ── Main loop ────────────────────────────────────────────────────
 
 def main():
@@ -897,8 +778,8 @@ def main():
 
         console.print()
         key = Prompt.ask(
-            "[dim]r刷新 a分析 f选股 c缓存 +加 -删 q退[/]",
-            choices=["r", "a", "f", "c", "+", "-", "q"],
+            "[dim]r刷新 f选股 c缓存 +加 -删 q退[/]",
+            choices=["r", "f", "c", "+", "-", "q"],
             show_choices=False,
         )
 
@@ -906,10 +787,6 @@ def main():
             break
         elif key == "r":
             refresh()
-        elif key == "a":
-            console.clear()
-            menu_analysis(watchlist)
-            snapshots = get_market_snapshot(watchlist)
         elif key == "f":
             console.clear()
             menu_stock_picker(watchlist)

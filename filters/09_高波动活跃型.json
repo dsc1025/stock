@@ -1,5 +1,5 @@
 {
-  "name": "高波动活跃型 — 120日均振幅>7%、均换手>4%、持续活跃高弹性标的",
+  "name": "高波动活跃型 — 日均振幅>7%、均换手>4%、持续活跃高弹性标的",
   "filters": {
     "turnover": {"min": 2.0, "max": 50.0, "enabled": false},
     "amplitude": {"min": 2.0, "max": 20.0, "enabled": false},
