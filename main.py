@@ -3,23 +3,18 @@ Stock quantitative analysis terminal.
 Uses baostock for historical/end-of-day data; refreshes on demand.
 
 Controls:
-  [r] refresh data        [q] quit
-  [a] analysis view       [f] stock picker
-  [c] cache manager       [+] add to watchlist
-  [-] remove from watchlist
+  [f] stock picker      [c] cache manager
+  [q] quit
 """
 from __future__ import annotations
 import os
-import time
 import json
-from datetime import datetime
 from typing import Optional, List, Dict
 
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 from rich.prompt import Prompt, Confirm
-from rich.rule import Rule
 from rich import box
 from rich.progress import (
     Progress, SpinnerColumn, BarColumn,
@@ -27,34 +22,13 @@ from rich.progress import (
 )
 
 from data_engine import (
-    login, logout, clear_hist_cache, update_hist_cache,
-    get_market_snapshot, get_realtime_quotes,
+    login, logout,
+    get_realtime_quotes,
     get_all_stock_codes, get_cached_stock_codes, refresh_hist_cache,
 )
 import db_manager
 
 console = Console()
-
-# Default watchlist (A-share codes)
-DEFAULT_WATCHLIST = [
-    "sh.600519",  # 贵州茅台
-    "sh.601318",  # 中国平安
-    "sh.600036",  # 招商银行
-    "sz.000858",  # 五粮液
-    "sh.600900",  # 长江电力
-    "sz.300750",  # 宁德时代
-    "sz.000001",  # 平安银行
-    "sh.688599",  # 天合光能
-]
-
-
-def load_watchlist() -> list[str]:
-    codes = db_manager.load_watchlist()
-    return codes if codes else DEFAULT_WATCHLIST[:]
-
-
-def save_watchlist(codes: list[str]):
-    db_manager.save_watchlist(codes)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -200,11 +174,8 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
     # ── Step 2: 批量加载预计算指标（一次SQL，取最后2行，无pandas） ──
     ind_map = db_manager.load_latest_indicators_batch(codes)
 
-    # ── Step 2.5: Pre-fetch avg volume for volume_rate filter ──
-    _vol_avg_cache: dict[str, float] = {}
-    if config["filters"].get("volume_rate", {}).get("enabled", False):
-        days_n = config["filters"]["volume_rate"].get("days", 5)
-        _vol_avg_cache = db_manager.get_avg_volume_batch(codes, days_n)
+    # ── Step 2.5: Pre-fetch avg volume (always, for 量比 display + volume_rate filter) ──
+    _vol_avg_cache: dict[str, float] = db_manager.get_avg_volume_batch(codes, 5)
 
     # ── Step 2.6: Pre-fetch rolling avg amplitude & avg turnover ──
     _avg_amp_to_cache: dict[str, dict] = {}
@@ -408,11 +379,16 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
         for k_name, val in scores.items():
             score += val * weights.get(k_name, 1.0)
 
+        # 量比 = 当日成交量 / 5日均量
+        avg_vol = _vol_avg_cache.get(code, 0)
+        vol_ratio = volume / avg_vol if avg_vol > 0 else 0
+
         candidates.append({
             "code": code,
             "name": code,
             "price": price,
             "pct_change": pct_change,
+            "vol_ratio": vol_ratio,
             "turnover": turnover,
             "amplitude": amplitude,
             "volume": float(last.get("volume", 0) or 0),
@@ -460,6 +436,7 @@ def make_picker_table(candidates: list[dict]) -> Table:
     t.add_column("名称", width=14)
     t.add_column("价格", justify="right", width=8)
     t.add_column("涨幅", justify="right", width=7)
+    t.add_column("量比", justify="right", width=6)
     t.add_column("换手", justify="right", width=7)
     t.add_column("振幅", justify="right", width=7)
     t.add_column("RSI", justify="right", width=5)
@@ -481,6 +458,7 @@ def make_picker_table(candidates: list[dict]) -> Table:
             c["name"],
             f"¥{c['price']:.2f}",
             Text.from_markup(color_pct(c["pct_change"])),
+            f"{c.get('vol_ratio', 0):.2f}",
             f"{c['turnover']:.1f}%",
             f"{c['amplitude']:.1f}%",
             f"{c['rsi']:.0f}",
@@ -496,7 +474,7 @@ def make_picker_table(candidates: list[dict]) -> Table:
     return t
 
 
-def menu_stock_picker(watchlist: list[str]):
+def menu_stock_picker():
     """选股工具交互菜单 - 支持预设筛选条件"""
     console.print("\n[bold cyan]=== 选股工具 ===[/]")
 
@@ -655,88 +633,85 @@ def _strip_prefix(code: str) -> str:
 
 
 def _auto_prefix(num: str) -> str:
-    """Infer exchange from numeric code: '600519' → 'sh.600519', '000001' → 'sz.000001'."""
+    """Infer exchange prefix from numeric code: '600519' → 'sh.600519'."""
     num = num.strip()
     return f"sh.{num}" if num[:1] in ("6", "9", "5") else f"sz.{num}"
 
 
-# ── Views ────────────────────────────────────────────────────────
+# ── 个股详情 ────────────────────────────────────────────────────
 
-def make_watchlist_table(snapshots: list[dict]) -> Table:
+def menu_stock_detail():
+    """个股详情 — 输入代码查看历史K线和技术指标。"""
+    console.print("\n[bold cyan]=== 个股详情 ===[/]")
+
+    raw = Prompt.ask("输入股票代码").strip()
+    if not raw:
+        return
+    code = _auto_prefix(raw) if raw.isdigit() else raw
+
+    # 验证股票代码
+    console.print("[dim]正在查询...[/]")
+    rt = get_realtime_quotes([code])
+    if not rt or not rt[0].get("name"):
+        console.print(f"[red]未找到 {raw}，请确认代码[/]")
+        Prompt.ask("\n按 Enter 返回")
+        return
+
+    name = rt[0]["name"]
+
+    # 获取历史数据
+    rows = db_manager.load_stock_history(code)
+    if not rows:
+        console.print(f"[yellow]{name} ({_strip_prefix(code)}) 暂无本地缓存数据，请先进入缓存管理下载[/]")
+        Prompt.ask("\n按 Enter 返回")
+        return
+
+    days = Prompt.ask(
+        "查看最近多少个交易日",
+        default="60",
+        show_default=True,
+    )
+    try:
+        days = int(days)
+        days = max(days, 5)
+    except ValueError:
+        days = 60
+
+    rows = rows[-days:][::-1]  # 取最近 N 天，最新在前
+
+    console.print(f"\n[bold]{name}[/] [dim]({_strip_prefix(code)}) 最近 {len(rows)} 个交易日[/]\n")
+
+    # 构建表格
     t = Table(
-        title="[bold cyan]实时行情[/]",
         box=box.SIMPLE_HEAVY,
         header_style="bold magenta",
         show_lines=False,
     )
-    t.add_column("代码", style="cyan", width=10)
-    t.add_column("名称", width=14)
-    t.add_column("最新价", justify="right", width=9)
-    t.add_column("涨跌幅", justify="right", width=8)
-    t.add_column("开盘", justify="right", width=9)
-    t.add_column("最高", justify="right", width=9)
-    t.add_column("最低", justify="right", width=9)
+    t.add_column("日期", style="cyan", width=10)
+    t.add_column("开盘", justify="right", width=8)
+    t.add_column("最高", justify="right", width=8)
+    t.add_column("最低", justify="right", width=8)
+    t.add_column("收盘", justify="right", width=8)
+    t.add_column("涨幅", justify="right", width=7)
+    t.add_column("换手", justify="right", width=7)
     t.add_column("振幅", justify="right", width=7)
-    t.add_column("换手率", justify="right", width=7)
-    t.add_column("成交量(手)", justify="right", width=12)
 
-    for s in snapshots:
-        code = s["code"]
-        name = s.get("name", "")
+    for r in rows:
+        pct = r.get("pctChg", 0) or 0
+
         t.add_row(
-            _strip_prefix(code),
-            name,
-            f"¥{s['close']:.2f}",
-            Text.from_markup(color_pct(s["pctChg"])),
-            f"¥{s['open']:.2f}",
-            f"¥{s['high']:.2f}",
-            f"¥{s['low']:.2f}",
-            f"{s.get('amplitude', 0):.2f}%",
-            "",  # 换手率：新浪不提供，留空
-            f"{int(s['volume']/100):,}",
+            str(r.get("date", "")),
+            f"¥{r.get('open', 0) or 0:.2f}",
+            f"¥{r.get('high', 0) or 0:.2f}",
+            f"¥{r.get('low', 0) or 0:.2f}",
+            f"¥{r.get('close', 0) or 0:.2f}",
+            Text.from_markup(color_pct(pct)),
+            f"{r.get('turn', 0) or 0:.1f}%",
+            f"{r.get('amplitude', 0) or 0:.1f}%",
         )
-    return t
 
-
-# ── Interactive menus ────────────────────────────────────────────
-
-def menu_add_stock(watchlist: list[str]) -> list[str]:
-    raw = Prompt.ask("输入添加的股票代码 (如 600519)").strip()
-    if not raw:
-        return watchlist
-    code = _auto_prefix(raw) if raw.isdigit() else raw
-    if code in watchlist:
-        console.print(f"[yellow]{_strip_prefix(code)} 已在自选股中[/]")
-        time.sleep(0.5)
-        return watchlist
-    console.print("[dim]正在验证股票代码...[/]", end="")
-    rt = get_realtime_quotes([code])
-    if not rt or not rt[0]["name"]:
-        console.print(f"\n[red]未找到 {raw}, 请确认代码 (如 600519 或 sh.600519)[/]")
-        time.sleep(1.5)
-        return watchlist
-    name = rt[0]["name"]
-    watchlist.append(code)
-    save_watchlist(watchlist)
-    console.print(f"\n[green]已添加: {name} ({_strip_prefix(code)})[/]")
-    time.sleep(0.8)
-    return watchlist
-
-
-def menu_remove_stock(watchlist: list[str]) -> list[str]:
-    for i, code in enumerate(watchlist):
-        console.print(f"  {i+1}. {_strip_prefix(code)}")
-    choice = Prompt.ask("输入要删除的序号")
-    try:
-        idx = int(choice) - 1
-        if 0 <= idx < len(watchlist):
-            removed = watchlist.pop(idx)
-            save_watchlist(watchlist)
-            console.print(f"[yellow]已删除 {removed}[/]")
-    except (ValueError, IndexError):
-        console.print("[red]无效序号[/]")
-    time.sleep(0.5)
-    return watchlist
+    console.print(t)
+    Prompt.ask("\n按 Enter 返回")
 
 
 # ── Main loop ────────────────────────────────────────────────────
@@ -756,49 +731,33 @@ def main():
 
     login()
 
-    watchlist = load_watchlist()
-    snapshots: list[dict] = []
-    last_refresh = ""
-
-    def refresh():
-        nonlocal snapshots, last_refresh
-        snapshots = get_market_snapshot(watchlist)
-        last_refresh = datetime.now().strftime("%H:%M:%S")
-
-    refresh()   # initial load
-
     while True:
         console.clear()
-        console.print(Rule(f"[dim]更新: {last_refresh}[/]"))
-
-        if snapshots:
-            console.print(make_watchlist_table(snapshots))
-        else:
-            console.print("[yellow]暂无行情数据, 按 r 刷新[/]")
-
+        console.print("\n[bold cyan]股票量化分析终端[/]")
         console.print()
+        console.print("  [f] 选股工具")
+        console.print("  [g] 个股详情")
+        console.print("  [c] 缓存管理")
+        console.print("  [q] 退出")
+        console.print()
+
         key = Prompt.ask(
-            "[dim]r刷新 f选股 c缓存 +加 -删 q退[/]",
-            choices=["r", "f", "c", "+", "-", "q"],
+            "[dim]f选股 g个股 c缓存 q退出[/]",
+            choices=["f", "c", "g", "q"],
             show_choices=False,
         )
 
         if key == "q":
             break
-        elif key == "r":
-            refresh()
         elif key == "f":
             console.clear()
-            menu_stock_picker(watchlist)
+            menu_stock_picker()
+        elif key == "g":
+            console.clear()
+            menu_stock_detail()
         elif key == "c":
             console.clear()
             menu_cache_manager()
-        elif key == "+":
-            console.clear()
-            watchlist = menu_add_stock(watchlist)
-        elif key == "-":
-            console.clear()
-            watchlist = menu_remove_stock(watchlist)
 
     logout()
 
