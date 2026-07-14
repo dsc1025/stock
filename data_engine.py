@@ -157,7 +157,7 @@ def get_stock_history(code: str, days: int = 120) -> list[dict]:
     return rows
 
 
-def refresh_hist_cache(codes: list[str], on_progress=None) -> tuple[int, int]:
+def refresh_hist_cache(codes: list[str], days: int = 500, on_progress=None) -> tuple[int, int]:
     """
     批量下载并保存股票历史K线到数据库。
 
@@ -180,7 +180,7 @@ def refresh_hist_cache(codes: list[str], on_progress=None) -> tuple[int, int]:
 
         for attempt in range(3):
             try:
-                rows = _fetch_history_from_api(code, days=120)
+                rows = _fetch_history_from_api(code, days=days)
                 if rows:
                     db_manager.save_stock_history(code, rows)
                     _hist_cache[code] = rows

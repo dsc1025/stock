@@ -436,7 +436,7 @@ def make_picker_table(candidates: list[dict]) -> Table:
     t.add_column("名称", width=14)
     t.add_column("价格", justify="right", width=8)
     t.add_column("涨幅", justify="right", width=7)
-    t.add_column("量比", justify="right", width=6)
+    t.add_column("成交量", justify="right", width=10)
     t.add_column("换手", justify="right", width=7)
     t.add_column("振幅", justify="right", width=7)
     t.add_column("RSI", justify="right", width=5)
@@ -458,7 +458,7 @@ def make_picker_table(candidates: list[dict]) -> Table:
             c["name"],
             f"¥{c['price']:.2f}",
             Text.from_markup(color_pct(c["pct_change"])),
-            f"{c.get('vol_ratio', 0):.2f}",
+            f"{int(c.get('volume', 0) / 100):,}",
             f"{c['turnover']:.1f}%",
             f"{c['amplitude']:.1f}%",
             f"{c['rsi']:.0f}",
@@ -610,7 +610,7 @@ def menu_cache_manager():
         def on_prog(code: str, done: int, total: int):
             progress.update(task, completed=done, description=f"[cyan]{_strip_prefix(code)}[/]")
 
-        success, errors = refresh_hist_cache(to_fetch, on_prog)
+        success, errors = refresh_hist_cache(to_fetch, days=500, on_progress=on_prog)
 
     console.print(f"\n[green]完成！成功 {success} 只，失败 {errors} 只[/]")
     Prompt.ask("\n按 Enter 返回")
@@ -644,74 +644,75 @@ def menu_stock_detail():
     """个股详情 — 输入代码查看历史K线和技术指标。"""
     console.print("\n[bold cyan]=== 个股详情 ===[/]")
 
-    raw = Prompt.ask("输入股票代码").strip()
-    if not raw:
-        return
-    code = _auto_prefix(raw) if raw.isdigit() else raw
+    while True:
+        raw = Prompt.ask("输入股票代码").strip()
+        if not raw:
+            Prompt.ask("\n按 Enter 返回")
+            return
+        code = _auto_prefix(raw) if raw.isdigit() else raw
 
-    # 验证股票代码
-    console.print("[dim]正在查询...[/]")
-    rt = get_realtime_quotes([code])
-    if not rt or not rt[0].get("name"):
-        console.print(f"[red]未找到 {raw}，请确认代码[/]")
-        Prompt.ask("\n按 Enter 返回")
-        return
+        # 验证股票代码
+        console.print("[dim]正在查询...[/]")
+        rt = get_realtime_quotes([code])
+        if not rt or not rt[0].get("name"):
+            console.print(f"[red]未找到 {raw}，请确认代码[/]\n")
+            continue
 
-    name = rt[0]["name"]
+        name = rt[0]["name"]
 
-    # 获取历史数据
-    rows = db_manager.load_stock_history(code)
-    if not rows:
-        console.print(f"[yellow]{name} ({_strip_prefix(code)}) 暂无本地缓存数据，请先进入缓存管理下载[/]")
-        Prompt.ask("\n按 Enter 返回")
-        return
+        # 获取历史数据
+        rows = db_manager.load_stock_history(code)
+        if not rows:
+            console.print(f"[yellow]{name} ({_strip_prefix(code)}) 暂无本地缓存数据[/]\n")
+            continue
 
-    days = Prompt.ask(
-        "查看最近多少个交易日",
-        default="60",
-        show_default=True,
-    )
-    try:
-        days = int(days)
-        days = max(days, 5)
-    except ValueError:
-        days = 60
-
-    rows = rows[-days:][::-1]  # 取最近 N 天，最新在前
-
-    console.print(f"\n[bold]{name}[/] [dim]({_strip_prefix(code)}) 最近 {len(rows)} 个交易日[/]\n")
-
-    # 构建表格
-    t = Table(
-        box=box.SIMPLE_HEAVY,
-        header_style="bold magenta",
-        show_lines=False,
-    )
-    t.add_column("日期", style="cyan", width=10)
-    t.add_column("开盘", justify="right", width=8)
-    t.add_column("最高", justify="right", width=8)
-    t.add_column("最低", justify="right", width=8)
-    t.add_column("收盘", justify="right", width=8)
-    t.add_column("涨幅", justify="right", width=7)
-    t.add_column("换手", justify="right", width=7)
-    t.add_column("振幅", justify="right", width=7)
-
-    for r in rows:
-        pct = r.get("pctChg", 0) or 0
-
-        t.add_row(
-            str(r.get("date", "")),
-            f"¥{r.get('open', 0) or 0:.2f}",
-            f"¥{r.get('high', 0) or 0:.2f}",
-            f"¥{r.get('low', 0) or 0:.2f}",
-            f"¥{r.get('close', 0) or 0:.2f}",
-            Text.from_markup(color_pct(pct)),
-            f"{r.get('turn', 0) or 0:.1f}%",
-            f"{r.get('amplitude', 0) or 0:.1f}%",
+        days = Prompt.ask(
+            "查看最近多少个交易日",
+            default="60",
+            show_default=True,
         )
+        try:
+            days = int(days)
+            days = max(days, 5)
+        except ValueError:
+            days = 60
 
-    console.print(t)
-    Prompt.ask("\n按 Enter 返回")
+        rows = rows[-days:][::-1]
+
+        console.print(f"\n[bold]{name}[/] [dim]({_strip_prefix(code)}) 最近 {len(rows)} 个交易日[/]\n")
+
+        t = Table(
+            box=box.SIMPLE_HEAVY,
+            header_style="bold magenta",
+            show_lines=False,
+        )
+        t.add_column("日期", style="cyan", width=10)
+        t.add_column("开盘", justify="right", width=8)
+        t.add_column("最高", justify="right", width=8)
+        t.add_column("最低", justify="right", width=8)
+        t.add_column("收盘", justify="right", width=8)
+        t.add_column("涨幅", justify="right", width=7)
+        t.add_column("成交量", justify="right", width=10)
+        t.add_column("换手", justify="right", width=7)
+        t.add_column("振幅", justify="right", width=7)
+
+        for r in rows:
+            pct = r.get("pctChg", 0) or 0
+            vol = r.get("volume", 0) or 0
+            t.add_row(
+                str(r.get("date", "")),
+                f"¥{r.get('open', 0) or 0:.2f}",
+                f"¥{r.get('high', 0) or 0:.2f}",
+                f"¥{r.get('low', 0) or 0:.2f}",
+                f"¥{r.get('close', 0) or 0:.2f}",
+                Text.from_markup(color_pct(pct)),
+                f"{int(vol / 100):,}",
+                f"{r.get('turn', 0) or 0:.1f}%",
+                f"{r.get('amplitude', 0) or 0:.1f}%",
+            )
+
+        console.print(t)
+        console.print()
 
 
 # ── Main loop ────────────────────────────────────────────────────
