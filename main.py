@@ -666,16 +666,18 @@ def menu_stock_detail():
             console.print(f"[yellow]{name} ({_strip_prefix(code)}) 暂无本地缓存数据[/]\n")
             continue
 
+        total_days = len(rows)
         days = Prompt.ask(
             "查看最近多少个交易日",
-            default="60",
-            show_default=True,
+            default="120",
+            show_default=False,
         )
+        console.print(f"[dim]查看最近多少个交易日 (120, 最多{total_days})[/]")
         try:
-            days = int(days)
-            days = max(days, 5)
+            days = int(days) if days else 120
+            days = max(min(days, total_days), 5)
         except ValueError:
-            days = 60
+            days = 120
 
         rows = rows[-days:][::-1]
 
