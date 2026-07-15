@@ -610,7 +610,7 @@ def menu_cache_manager():
         def on_prog(code: str, done: int, total: int):
             progress.update(task, completed=done, description=f"[cyan]{_strip_prefix(code)}[/]")
 
-        success, errors = refresh_hist_cache(to_fetch, days=500, on_progress=on_prog)
+        success, errors = refresh_hist_cache(to_fetch, days=730, on_progress=on_prog)
 
     console.print(f"\n[green]完成！成功 {success} 只，失败 {errors} 只[/]")
     Prompt.ask("\n按 Enter 返回")
