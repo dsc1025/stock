@@ -668,11 +668,10 @@ def menu_stock_detail():
 
         total_days = len(rows)
         days = Prompt.ask(
-            "查看最近多少个交易日",
+            f"查看最近多少个交易日 (默认120, 最多{total_days})",
             default="120",
-            show_default=False,
+            show_default=True,
         )
-        console.print(f"[dim]查看最近多少个交易日 (120, 最多{total_days})[/]")
         try:
             days = int(days) if days else 120
             days = max(min(days, total_days), 5)
