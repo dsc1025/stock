@@ -694,12 +694,14 @@ def menu_stock_detail():
         t.add_column("收盘", justify="right", width=8)
         t.add_column("涨幅", justify="right", width=7)
         t.add_column("成交量", justify="right", width=10)
+        t.add_column("成交额", justify="right", width=10)
         t.add_column("换手", justify="right", width=7)
         t.add_column("振幅", justify="right", width=7)
 
         for r in rows:
             pct = r.get("pctChg", 0) or 0
             vol = r.get("volume", 0) or 0
+            amt = r.get("amount", 0) or 0
             t.add_row(
                 str(r.get("date", "")),
                 f"¥{r.get('open', 0) or 0:.2f}",
@@ -708,6 +710,7 @@ def menu_stock_detail():
                 f"¥{r.get('close', 0) or 0:.2f}",
                 Text.from_markup(color_pct(pct)),
                 f"{int(vol / 100):,}",
+                f"{amt / 100000000:.2f}亿",
                 f"{r.get('turn', 0) or 0:.1f}%",
                 f"{r.get('amplitude', 0) or 0:.1f}%",
             )
