@@ -268,14 +268,16 @@ def refresh_hist_incremental(codes: list[str], on_progress=None) -> tuple[int, i
                 if not new_rows:
                     break  # 无新数据（可能是周末/节假日）
 
-                # 从数据库加载最近历史作为指标计算上下文
-                old_rows = db_manager.load_stock_history(code) or []
-                context = old_rows[-150:] if len(old_rows) > 150 else old_rows
+                # 从数据库仅加载尾部作为指标计算上下文（快，LIMIT查询）
+                old_rows = db_manager.load_stock_history_tail(code, 150) or []
+                combined = old_rows + new_rows
 
-                # 合并上下文 + 新数据，save_stock_history 内部会调用
-                # add_indicators 重新计算全部技术指标，然后 UPSERT 入库
-                combined = context + new_rows
-                db_manager.save_stock_history(code, combined)
+                # 在合并数据集上计算技术指标（保证新行的指标正确）
+                combined = add_indicators(combined)
+
+                # 只保存新行（old_rows 的指标无需更新，跳过重复写入）
+                db_manager.upsert_stock_rows(code, new_rows)
+
                 # 清除内存缓存，下次访问时从 DB 重新加载最新数据
                 _hist_cache.pop(code, None)
                 success += 1

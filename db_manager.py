@@ -160,34 +160,48 @@ def backfill_amplitude():
 
 # ── Stock History ───────────────────────────────────────────────────────
 
-def save_stock_history(code: str, rows: list[dict]):
-    """Save K-line data with pre-computed indicators for one stock."""
+_IND_COLS = [
+    "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD",
+    "RSI14", "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14",
+]
+
+_NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg", "amplitude",
+             "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD", "RSI14",
+             "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14"]
+
+
+def _convert_numeric(row: dict):
+    """Convert numeric fields from DB strings to float/int in-place."""
+    for col in _NUM_COLS:
+        if col in row and row[col] is not None:
+            try:
+                row[col] = float(row[col]) if col != "volume" else int(row[col])
+            except (ValueError, TypeError):
+                pass
+
+
+def upsert_stock_rows(code: str, rows: list[dict]):
+    """Raw UPSERT of K-line rows into stock_history (no indicator computation).
+
+    Use this when indicators have already been computed externally
+    (e.g. in incremental update, where add_indicators was called on
+    a combined context+new dataset).
+    """
     if not rows:
         return
 
-    # Ensure indicators are computed
-    from data_engine import add_indicators
-    rows = add_indicators(rows)
-
-    _IND_COLS = [
-        "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD",
-        "RSI14", "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14",
-    ]
+    cols = ["code", "date", "open", "high", "low", "close", "preclose",
+            "volume", "amount", "turn", "pctChg", "amplitude"] + _IND_COLS
+    placeholders = ",".join(["%s"] * len(cols))
+    update_cols = [c for c in cols if c not in ("code", "date")]
+    update_clause = ",".join(f"{c}=VALUES({c})" for c in update_cols)
+    sql = (
+        f"INSERT INTO stock_history ({','.join(cols)}) VALUES ({placeholders}) "
+        f"ON DUPLICATE KEY UPDATE {update_clause}"
+    )
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cols = ["code", "date", "open", "high", "low", "close", "preclose",
-                    "volume", "amount", "turn", "pctChg", "amplitude"] + _IND_COLS
-            placeholders = ",".join(["%s"] * len(cols))
-            # ON DUPLICATE KEY UPDATE：利用唯一键 uk_code_date(code,date) 去重，
-            # 避免每次刷新都 DELETE 全量数据。UPDATE 子句需列出所有非键列。
-            update_cols = [c for c in cols if c not in ("code", "date")]
-            update_clause = ",".join(f"{c}=VALUES({c})" for c in update_cols)
-            sql = (
-                f"INSERT INTO stock_history ({','.join(cols)}) VALUES ({placeholders}) "
-                f"ON DUPLICATE KEY UPDATE {update_clause}"
-            )
-
             data_rows = []
             for r in rows:
                 row = [
@@ -204,8 +218,17 @@ def save_stock_history(code: str, rows: list[dict]):
             cur.executemany(sql, data_rows)
 
 
+def save_stock_history(code: str, rows: list[dict]):
+    """Save K-line data with pre-computed indicators for one stock."""
+    if not rows:
+        return
+    from data_engine import add_indicators
+    rows = add_indicators(rows)
+    upsert_stock_rows(code, rows)
+
+
 def load_stock_history(code: str) -> list[dict] | None:
-    """Load K-line data with indicators for one stock. Returns list of row dicts."""
+    """Load all K-line data with indicators for one stock. Returns list of row dicts."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -218,17 +241,31 @@ def load_stock_history(code: str) -> list[dict] | None:
             rows = cur.fetchall()
     if not rows:
         return None
-    # Convert numeric strings from DB to float/int
-    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg", "amplitude",
-                 "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD", "RSI14",
-                 "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14"]
     for r in rows:
-        for col in _NUM_COLS:
-            if col in r and r[col] is not None:
-                try:
-                    r[col] = float(r[col]) if col != "volume" else int(r[col])
-                except (ValueError, TypeError):
-                    pass
+        _convert_numeric(r)
+    return rows
+
+
+def load_stock_history_tail(code: str, n: int = 150) -> list[dict] | None:
+    """Load the last N rows of K-line data for one stock (fast, uses LIMIT).
+
+    Returns rows in chronological order (oldest first), or None if no data.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT date, open, high, low, close, volume, amount, turn, pctChg, amplitude, "
+                "MA5, MA10, MA20, MA60, DIF, DEA, MACD, RSI14, "
+                "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
+                "FROM stock_history WHERE code = %s ORDER BY date DESC LIMIT %s",
+                (code, n),
+            )
+            rows = cur.fetchall()
+    if not rows:
+        return None
+    rows.reverse()  # chronological order
+    for r in rows:
+        _convert_numeric(r)
     return rows
 
 
@@ -331,22 +368,12 @@ def load_stock_history_batch(codes: list[str], days: int = 120) -> dict[str, lis
     if not rows:
         return {}
 
-    _NUM_COLS = ["open", "high", "low", "close", "volume", "amount", "turn", "pctChg", "amplitude",
-                 "MA5", "MA10", "MA20", "MA60", "DIF", "DEA", "MACD", "RSI14",
-                 "BB_UP", "BB_MID", "BB_LO", "K", "D", "ATR14"]
-
     result: dict[str, list[dict]] = {}
     for r in rows:
         code = r["code"]
         if code not in result:
             result[code] = []
-        # Convert numeric fields
-        for col in _NUM_COLS:
-            if col in r and r[col] is not None:
-                try:
-                    r[col] = float(r[col]) if col != "volume" else int(r[col])
-                except (ValueError, TypeError):
-                    pass
+        _convert_numeric(r)
         result[code].append(r)
 
     # Keep only the last `days` rows per code
