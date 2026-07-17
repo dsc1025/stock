@@ -255,15 +255,18 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             hi = config["filters"]["price_range"]["max"]
             if not (lo <= price <= hi):
                 passed = False
-        # 5 成交量突增 — 预取批量volume数据
+        # 5 成交量突增/缩量 — 预取批量volume数据
         if _chk("volume_rate"):
             days_n = config["filters"]["volume_rate"].get("days", 5)
             min_r = config["filters"]["volume_rate"].get("min_vs_avg", 1.5)
+            max_r = config["filters"]["volume_rate"].get("max_vs_avg", 999)
             # Use pre-fetched avg volume dict
             avg_vol = _vol_avg_cache.get(code, 0)
             if avg_vol > 0:
                 cur_r = volume / avg_vol
                 if cur_r < min_r:
+                    passed = False
+                if cur_r > max_r:
                     passed = False
                 scores["volume"] = min(cur_r, 2.0)
         # 6 RSI 范围
@@ -328,23 +331,43 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
         # 15 价格 vs MA20
         if _chk("price_vs_ma20"):
             rel = config["filters"]["price_vs_ma20"]["relation"]
-            pct = config["filters"]["price_vs_ma20"]["pct"]
-            if rel == "above" and price < ma20 * (1 + pct / 100):
-                passed = False
-            if rel == "below" and price > ma20 * (1 - pct / 100):
-                passed = False
+            cfg = config["filters"]["price_vs_ma20"]
+            # 兼容旧格式 "pct" 和新格式 "pct_min"/"pct_max"
+            pct_lo = cfg.get("pct_min", cfg.get("pct", 0))
+            pct_hi = cfg.get("pct_max", cfg.get("pct", 999))
+            if rel == "above":
+                if price < ma20 * (1 + pct_lo / 100):
+                    passed = False
+                if price > ma20 * (1 + pct_hi / 100):
+                    passed = False
+            if rel == "below":
+                if price > ma20 * (1 - pct_lo / 100):
+                    passed = False
+                if price < ma20 * (1 - pct_hi / 100):
+                    passed = False
         # 16 价格 vs MA60
         if _chk("price_vs_ma60"):
             rel = config["filters"]["price_vs_ma60"]["relation"]
-            pct = config["filters"]["price_vs_ma60"]["pct"]
-            if rel == "above" and price < ma60 * (1 + pct / 100):
-                passed = False
-            if rel == "below" and price > ma60 * (1 - pct / 100):
-                passed = False
+            cfg = config["filters"]["price_vs_ma60"]
+            pct_lo = cfg.get("pct_min", cfg.get("pct", 0))
+            pct_hi = cfg.get("pct_max", cfg.get("pct", 999))
+            if rel == "above":
+                if price < ma60 * (1 + pct_lo / 100):
+                    passed = False
+                if price > ma60 * (1 + pct_hi / 100):
+                    passed = False
+            if rel == "below":
+                if price > ma60 * (1 - pct_lo / 100):
+                    passed = False
+                if price < ma60 * (1 - pct_hi / 100):
+                    passed = False
         # 17 ATR 波动性
         if _chk("atr_ratio"):
             ratio = atr / price * 100 if price > 0 else 0
-            if ratio < config["filters"]["atr_ratio"]["min"]:
+            cfg = config["filters"]["atr_ratio"]
+            if ratio < cfg.get("min", 0):
+                passed = False
+            if "max" in cfg and ratio > cfg["max"]:
                 passed = False
             scores["atr"] = min(ratio / 2, 1.0)
         # 18 最低价/最高价比值
