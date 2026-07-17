@@ -1,0 +1,48 @@
+{
+  "name": "低波动稳健型 — 放量上涨→缩量回调企稳, 换手<3%, 回撤≤8%, 靠近均线支撑",
+  "filters": {
+    "turnover": {"min": 0.1, "max": 3.0, "enabled": true},
+    "amplitude": {"min": 0.5, "max": 4.0, "enabled": true},
+    "pct_change": {"min": -2.0, "max": 3.0, "enabled": true},
+    "price_range": {"min": 5, "max": 500, "enabled": true},
+    "volume_rate": {"enabled": true, "min_vs_avg": 0.2, "max_vs_avg": 0.6, "days": 5, "consecutive_days": 2, "desc": "连续≥2天成交量低于5日均量60%, 持续性缩量"},
+    "volume_surge_history": {
+      "enabled": true,
+      "lookback_start": 5,
+      "lookback_end": 20,
+      "surge_volume_ratio": 1.5,
+      "surge_min_pct": 3.0,
+      "price_up": true,
+      "desc": "5~20日内曾放量(>1.5倍均量)且累计涨幅≥3%, 有效吸筹非出货"
+    },
+    "pullback_from_high": {
+      "enabled": true,
+      "max_pullback_pct": 8.0,
+      "lookback_days": 20,
+      "desc": "从近期高点最大回撤≤8%, 回调可控非趋势反转"
+    },
+    "rsi": {"enabled": true, "min": 35, "max": 60},
+    "rsi_oversold": {"enabled": false, "threshold": 30},
+    "rsi_overbought": {"enabled": false, "threshold": 70},
+    "macd_golden_cross": {"enabled": false},
+    "macd_death_cross": {"enabled": false},
+    "kdj": {"enabled": false, "min": 10, "max": 90},
+    "kdj_low_cross": {"enabled": false, "threshold": 30},
+    "bb_position": {"enabled": true, "position": "middle"},
+    "ma_trend": {"enabled": true, "type": "bullish"},
+    "price_vs_ma20": {"enabled": true, "relation": "above", "pct_min": 0.0, "pct_max": 5.0, "desc": "价格在MA20上方0~5%窄带内, 回调至支撑附近"},
+    "price_vs_ma60": {"enabled": true, "relation": "above", "pct": 0.0},
+    "atr_ratio": {"enabled": true, "min": 0.0, "max": 2.0},
+    "high_low_ratio": {"enabled": true, "min": 0.90}
+  },
+  "signal_weights": {
+    "macd_golden": 1.5,
+    "rsi_oversold": 0.5,
+    "kdj_cross": 0.5,
+    "volume": 0.5,
+    "bb_middle": 1.0,
+    "volume_contraction_after_surge": 2.5,
+    "pullback_controlled": 1.5,
+    "ma20_support": 1.0
+  }
+}
