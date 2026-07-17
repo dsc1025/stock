@@ -94,18 +94,8 @@ def get_all_stock_codes() -> list[str]:
     return []
 
 
-def _fetch_history_from_api(code: str, days: int = 120) -> list[dict]:
-    """直接调用 baostock API 获取历史K线，不经过任何缓存。返回 list[dict]。"""
-    end = datetime.today().strftime("%Y-%m-%d")
-    start = (datetime.today() - timedelta(days=days + 30)).strftime("%Y-%m-%d")
-    rs = bs.query_history_k_data_plus(
-        code,
-        "date,open,high,low,close,preclose,volume,amount,turn,pctChg",
-        start_date=start,
-        end_date=end,
-        frequency="d",
-        adjustflag="3",
-    )
+def _parse_api_rows(rs) -> list[dict]:
+    """Parse baostock query_history_k_data_plus result into list[dict]."""
     rows: list[dict] = []
     while rs.error_code == "0" and rs.next():
         r = rs.get_row_data()
@@ -132,6 +122,27 @@ def _fetch_history_from_api(code: str, days: int = 120) -> list[dict]:
             continue
         if row["close"] is not None:
             rows.append(row)
+    return rows
+
+
+def _fetch_history_from_api_range(code: str, start_date: str, end_date: str) -> list[dict]:
+    """Fetch K-line data from baostock between explicit start/end dates (inclusive)."""
+    rs = bs.query_history_k_data_plus(
+        code,
+        "date,open,high,low,close,preclose,volume,amount,turn,pctChg",
+        start_date=start_date,
+        end_date=end_date,
+        frequency="d",
+        adjustflag="3",
+    )
+    return _parse_api_rows(rs)
+
+
+def _fetch_history_from_api(code: str, days: int = 120) -> list[dict]:
+    """直接调用 baostock API 获取历史K线，不经过任何缓存。返回 list[dict]。"""
+    end = datetime.today().strftime("%Y-%m-%d")
+    start = (datetime.today() - timedelta(days=days + 30)).strftime("%Y-%m-%d")
+    rows = _fetch_history_from_api_range(code, start, end)
     return rows[-days:] if len(rows) > days else rows
 
 
@@ -197,6 +208,88 @@ def refresh_hist_cache(codes: list[str], days: int = 500, on_progress=None) -> t
 
         if on_progress:
             on_progress(code, i, total)
+    return success, errors
+
+
+def refresh_hist_incremental(codes: list[str], on_progress=None) -> tuple[int, int]:
+    """增量更新：仅拉取每只股票自上次缓存日期以来的新交易日数据。
+
+    相比全量刷新（每只拉取730天），增量更新通常每只仅拉取1-5天，
+    大幅节省时间和网络资源，适合每日收盘后快速更新。
+
+    为确保技术指标（MA/MACD/RSI/KDJ等）计算正确，会从数据库加载
+    最近的历史数据作为计算上下文，与新数据合并后一并保存。
+
+    Args:
+        codes: 需要增量更新的股票代码列表
+        on_progress: 进度回调 (current_code: str, done: int, total: int)
+
+    Returns:
+        (updated_count, error_count) — 已是最新的股票不计入
+    """
+    import time as _time
+
+    _bs_force_login()
+
+    # 批量获取每只股票的最新日期
+    latest_dates = db_manager.get_latest_dates_batch(codes)
+    today_str = datetime.today().strftime("%Y-%m-%d")
+
+    success, errors, skipped = 0, 0, 0
+    total = len(codes)
+
+    for i, code in enumerate(codes, 1):
+        latest = latest_dates.get(code)
+        if not latest:
+            skipped += 1
+            if on_progress:
+                on_progress(code, i, total)
+            continue
+
+        # 已是最新（缓存日期 ≥ 今天）→ 跳过
+        if latest >= today_str:
+            skipped += 1
+            if on_progress:
+                on_progress(code, i, total)
+            continue
+
+        # 每100只强制重连
+        if i % 100 == 0:
+            _time.sleep(2)
+            _bs_force_login()
+
+        # 计算需要拉取的起始日期（latest 的下一天）
+        start_dt = datetime.strptime(latest[:10], "%Y-%m-%d") + timedelta(days=1)
+        start = start_dt.strftime("%Y-%m-%d")
+
+        for attempt in range(3):
+            try:
+                new_rows = _fetch_history_from_api_range(code, start, today_str)
+                if not new_rows:
+                    break  # 无新数据（可能是周末/节假日）
+
+                # 从数据库加载最近历史作为指标计算上下文
+                old_rows = db_manager.load_stock_history(code) or []
+                context = old_rows[-150:] if len(old_rows) > 150 else old_rows
+
+                # 合并上下文 + 新数据，save_stock_history 内部会调用
+                # add_indicators 重新计算全部技术指标，然后 UPSERT 入库
+                combined = context + new_rows
+                db_manager.save_stock_history(code, combined)
+                # 清除内存缓存，下次访问时从 DB 重新加载最新数据
+                _hist_cache.pop(code, None)
+                success += 1
+                break
+            except Exception:
+                if attempt < 2:
+                    _time.sleep(3)
+                    _bs_force_login()
+                else:
+                    errors += 1
+
+        if on_progress:
+            on_progress(code, i, total)
+
     return success, errors
 
 

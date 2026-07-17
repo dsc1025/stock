@@ -240,6 +240,24 @@ def get_cached_stock_codes() -> list[str]:
             return [r["code"] for r in cur.fetchall()]
 
 
+def get_latest_dates_batch(codes: list[str]) -> dict[str, str]:
+    """Get the latest trading date for each stock code in one query.
+
+    Returns {code: "YYYY-MM-DD"}. Codes without data are omitted.
+    """
+    if not codes:
+        return {}
+    placeholders = ",".join(["%s"] * len(codes))
+    sql = (
+        "SELECT code, MAX(date) AS max_date FROM stock_history "
+        f"WHERE code IN ({placeholders}) GROUP BY code"
+    )
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, codes)
+            return {r["code"]: str(r["max_date"]) for r in cur.fetchall()}
+
+
 # ── Batch Operations (performance optimized) ────────────────────────────
 
 def prefilter_codes_by_latest(config_filters: dict) -> list[str] | None:

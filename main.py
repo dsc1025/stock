@@ -25,6 +25,7 @@ from data_engine import (
     login, logout,
     get_realtime_quotes,
     get_all_stock_codes, get_cached_stock_codes, refresh_hist_cache,
+    refresh_hist_incremental,
 )
 import db_manager
 
@@ -562,10 +563,11 @@ def menu_cache_manager():
     console.print(f"[dim]数据库已缓存: [bold]{len(cached)}[/] 只股票[/]")
 
     console.print("\n  [1] 补全缺失 (只下载还没有缓存的股票)")
-    console.print("  [2] 刷新全部 (重新下载所有A股数据)")
+    console.print("  [2] 增量更新 (仅更新昨日至今的新数据)")
+    console.print("  [3] 刷新全部 (重新下载所有A股数据)")
     console.print("  [q] 返回")
 
-    choice = Prompt.ask("\n选择", choices=["1", "2", "q"], default="q", show_choices=False)
+    choice = Prompt.ask("\n选择", choices=["1", "2", "3", "q"], default="q", show_choices=False)
     if choice == "q":
         return
 
@@ -582,16 +584,26 @@ def menu_cache_manager():
         cached_set = set(cached)
         to_fetch = [c for c in all_codes if c not in cached_set]
         action = f"补全缺失 ({len(to_fetch)} 只)"
+    elif choice == "2":
+        # 增量更新：只更新已缓存的股票
+        to_fetch = [c for c in all_codes if c in set(cached)]
+        action = f"增量更新 ({len(to_fetch)} 只已缓存股票)"
     else:
         to_fetch = all_codes
         action = f"刷新全部 ({len(to_fetch)} 只)"
 
     if not to_fetch:
-        console.print("[green]缓存已是最新，无需下载[/]")
+        console.print("[green]无需操作[/]")
         Prompt.ask("\n按 Enter 返回")
         return
 
-    console.print(f"\n[yellow]{action}，每只约0.5秒，请耐心等待...[/]")
+    # 增量更新的提示信息
+    if choice == "2":
+        console.print(f"\n[cyan]{action}[/]")
+        console.print("[dim]增量更新仅拉取每只股票上次缓存日期之后的新数据，速度快、资源省[/]")
+    else:
+        console.print(f"\n[yellow]{action}，每只约0.5秒，请耐心等待...[/]")
+
     if not Confirm.ask("确认开始?"):
         return
 
@@ -610,7 +622,10 @@ def menu_cache_manager():
         def on_prog(code: str, done: int, total: int):
             progress.update(task, completed=done, description=f"[cyan]{_strip_prefix(code)}[/]")
 
-        success, errors = refresh_hist_cache(to_fetch, days=730, on_progress=on_prog)
+        if choice == "2":
+            success, errors = refresh_hist_incremental(to_fetch, on_progress=on_prog)
+        else:
+            success, errors = refresh_hist_cache(to_fetch, days=730, on_progress=on_prog)
 
     console.print(f"\n[green]完成！成功 {success} 只，失败 {errors} 只[/]")
     Prompt.ask("\n按 Enter 返回")
@@ -742,7 +757,7 @@ def main():
         console.print()
         console.print("  [f] 选股工具")
         console.print("  [g] 个股详情")
-        console.print("  [c] 缓存管理")
+        console.print("  [c] 缓存管理 (全量/补全/增量)")
         console.print("  [q] 退出")
         console.print()
 
