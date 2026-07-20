@@ -184,8 +184,23 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
     _avg_amp_to_cache = db_manager.get_avg_amplitude_turnover_batch(codes, lookback)
     need_avg_120 = True
 
+    # ── Step 2.7: Pre-fetch multi-day history (for prior_rally / volume_selloff filters) ──
+    _history_cache: dict[str, list[dict]] = {}
+    _need_history = (
+        config["filters"].get("prior_rally", {}).get("enabled", False)
+        or config["filters"].get("volume_selloff", {}).get("enabled", False)
+    )
+    if _need_history:
+        hist_days = max(
+            config["filters"].get("prior_rally", {}).get("lookback_days",
+                config.get("lookback_days", 60)),
+            30,
+        )
+        _history_cache = db_manager.load_stock_history_batch(codes, hist_days + 5)
+
     # ── Step 3: 直接使用预计算指标应用筛选 ──
     candidates = []
+    _peak_info: dict[str, dict] = {}  # shared between prior_rally & volume_selloff
 
     for code, rows in ind_map.items():
         last = rows["last"]
@@ -334,7 +349,7 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             cfg = config["filters"]["price_vs_ma20"]
             # 兼容旧格式 "pct" 和新格式 "pct_min"/"pct_max"
             pct_lo = cfg.get("pct_min", cfg.get("pct", 0))
-            pct_hi = cfg.get("pct_max", cfg.get("pct", 999))
+            pct_hi = cfg.get("pct_max", 999)
             if rel == "above":
                 if price < ma20 * (1 + pct_lo / 100):
                     passed = False
@@ -350,7 +365,7 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             rel = config["filters"]["price_vs_ma60"]["relation"]
             cfg = config["filters"]["price_vs_ma60"]
             pct_lo = cfg.get("pct_min", cfg.get("pct", 0))
-            pct_hi = cfg.get("pct_max", cfg.get("pct", 999))
+            pct_hi = cfg.get("pct_max", 999)
             if rel == "above":
                 if price < ma60 * (1 + pct_lo / 100):
                     passed = False
@@ -393,6 +408,85 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             if avg_turn_120 < config["filters"]["avg_turnover_120"]["min"]:
                 passed = False
             scores["avg_turn_120"] = min(avg_turn_120 / 2.0, 2.0)
+        # 21 前期大涨检测 — 回看N日内是否有显著涨幅
+        if _chk("prior_rally"):
+            cfg = config["filters"]["prior_rally"]
+            lb = cfg.get("lookback_days", config.get("lookback_days", 60))
+            min_gain = cfg.get("min_gain_pct", 20)
+            exclude = cfg.get("exclude_recent_days", 10)
+            hist = _history_cache.get(code, [])
+            if hist and len(hist) > exclude + 5:
+                n = len(hist)
+                search_end = n - exclude  # exclude recent days from peak search
+                search_start = max(0, search_end - lb)
+                if search_end > search_start:
+                    # find highest close in [search_start, search_end)
+                    peak_idx = search_start
+                    peak_close = float(hist[search_start].get("close", 0) or 0)
+                    for i in range(search_start + 1, search_end):
+                        c = float(hist[i].get("close", 0) or 0)
+                        if c > peak_close:
+                            peak_close = c
+                            peak_idx = i
+                    start_close = float(hist[search_start].get("close", 0) or 0)
+                    if start_close > 0:
+                        rally_pct = (peak_close / start_close - 1) * 100
+                        if rally_pct < min_gain:
+                            passed = False
+                        else:
+                            scores["prior_rally"] = min(rally_pct / min_gain, 2.0)
+                    else:
+                        passed = False
+                else:
+                    passed = False
+            else:
+                passed = False  # insufficient history
+            # store peak info for volume_selloff to reuse
+            if passed and hist:
+                _peak_info[code] = {"idx": peak_idx, "close": peak_close}
+        # 22 放量下跌检测 — 峰值后出现放量阴线, 且回撤达标
+        if _chk("volume_selloff"):
+            cfg = config["filters"]["volume_selloff"]
+            min_vr = cfg.get("min_volume_ratio", 1.2)
+            min_dd = cfg.get("min_drawdown_pct", 5)
+            hist = _history_cache.get(code, [])
+            if hist and len(hist) >= 2:
+                n = len(hist)
+                # find peak position (reuse from prior_rally if available, or scan all)
+                peak_idx = _peak_info.get(code, {}).get("idx", -1)
+                peak_close = _peak_info.get(code, {}).get("close", 0.0)
+                if peak_idx < 0:
+                    # scan all history for peak
+                    peak_idx = 0
+                    peak_close = float(hist[0].get("close", 0) or 0)
+                    for i in range(1, n):
+                        c = float(hist[i].get("close", 0) or 0)
+                        if c > peak_close:
+                            peak_close = c
+                            peak_idx = i
+                # check for volume sell-off after peak
+                found_selloff = False
+                if peak_idx < n - 1:
+                    for i in range(peak_idx + 1, n):
+                        day_vol = float(hist[i].get("volume", 0) or 0)
+                        day_pct = float(hist[i].get("pctChg", 0) or 0)
+                        # compute local avg volume (5-day before this day)
+                        local_vols = []
+                        for j in range(max(0, i - 5), i):
+                            local_vols.append(float(hist[j].get("volume", 0) or 0))
+                        local_avg = sum(local_vols) / len(local_vols) if local_vols else 1
+                        if local_avg > 0 and day_vol > local_avg * min_vr and day_pct < 0:
+                            found_selloff = True
+                            break
+                # check drawdown from peak
+                dd_pct = (peak_close - price) / peak_close * 100 if peak_close > 0 else 0
+                if not found_selloff or dd_pct < min_dd:
+                    passed = False
+                else:
+                    scores["volume_selloff"] = min(dd_pct / min_dd, 2.0)
+            # if no history, skip (don't fail — insufficient data)
+        if code in _peak_info:
+            del _peak_info[code]
 
         if not passed:
             continue

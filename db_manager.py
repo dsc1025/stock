@@ -346,7 +346,8 @@ def prefilter_codes_by_latest(config_filters: dict) -> list[str] | None:
 
 
 def load_stock_history_batch(codes: list[str], days: int = 120) -> dict[str, list[dict]]:
-    """Load K-line data (with pre-computed indicators) for many stocks in ONE query."""
+    """Load recent K-line data for many stocks in ONE query.
+    Uses a date filter to only fetch data within `days` of the latest trading date."""
     if not codes:
         return {}
 
@@ -357,12 +358,13 @@ def load_stock_history_batch(codes: list[str], days: int = 120) -> dict[str, lis
         "BB_UP, BB_MID, BB_LO, K, D, ATR14 "
         "FROM stock_history "
         f"WHERE code IN ({placeholders}) "
+        "AND date >= DATE_SUB((SELECT MAX(date) FROM stock_history), INTERVAL %s DAY) "
         "ORDER BY code, date"
     )
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, codes)
+            cur.execute(sql, codes + [days + 10])  # +10 buffer
             rows = cur.fetchall()
 
     if not rows:
