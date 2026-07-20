@@ -7,8 +7,6 @@ Controls:
   [q] quit
 """
 from __future__ import annotations
-import os
-import json
 from typing import Optional, List, Dict
 
 from rich.console import Console
@@ -33,117 +31,7 @@ console = Console()
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 选股配置管理函数
-# ─────────────────────────────────────────────────────────────────────────
-
-# ── 选股配置：文件为主，DB 为运行时缓存 ──
-
-_STOCK_PICKER_CONFIG_FILE = "stock_picker_config.json"
-_FILTERS_DIR = "filters"
-
-
-def load_picker_config() -> dict:
-    """加载选股配置：文件优先，DB 回退，最后用默认值。"""
-    # 1. 优先从 JSON 文件读取（方便手动编辑）
-    cfg = _load_json_file(_STOCK_PICKER_CONFIG_FILE)
-    if cfg:
-        return cfg
-    # 2. 回退到数据库
-    cfg = db_manager.load_config("stock_picker")
-    if cfg:
-        return cfg
-    # 3. 最后使用代码默认值
-    return _get_default_picker_config()
-
-
-def load_preset_filters() -> dict[str, dict]:
-    """加载预设筛选策略：文件优先，DB 回退。返回 {key: {name, config}}。"""
-    presets = {}
-
-    # 1. 优先从 filters/ 目录读取 JSON 文件
-    if os.path.exists(_FILTERS_DIR):
-        for idx, filename in enumerate(
-            sorted(f for f in os.listdir(_FILTERS_DIR) if f.endswith(".json")), 1
-        ):
-            cfg = _load_json_file(os.path.join(_FILTERS_DIR, filename))
-            if cfg:
-                presets[str(idx)] = {"config": cfg, "name": cfg.get("name", filename)}
-
-    # 2. 如果文件为空，尝试从 DB 加载
-    if not presets:
-        try:
-            for i in range(1, 20):
-                key = f"filter_0{i}" if i < 10 else f"filter_{i}"
-                cfg = db_manager.load_config(key)
-                if cfg:
-                    presets[str(i)] = {"config": cfg, "name": cfg.get("name", f"Preset {i}")}
-        except Exception:
-            pass
-
-    return presets
-
-
-def _load_json_file(path: str) -> dict | None:
-    """安全读取 JSON 文件，失败返回 None。"""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def _get_default_picker_config() -> dict:
-    """返回默认选股配置（代码内置兜底）。"""
-    return {
-        "filters": {
-            "turnover": {"min": 2.0, "max": 50.0, "enabled": True},
-            "amplitude": {"min": 2.0, "max": 20.0, "enabled": True},
-            "pct_change": {"min": -5.0, "max": 15.0, "enabled": True},
-            "price_range": {"min": 5, "max": 500, "enabled": True},
-            "volume_rate": {"enabled": False, "min_vs_avg": 1.5, "days": 5},
-            "rsi": {"enabled": False, "min": 20, "max": 80},
-            "rsi_oversold": {"enabled": False, "threshold": 30},
-            "rsi_overbought": {"enabled": False, "threshold": 70},
-            "macd_golden_cross": {"enabled": False},
-            "macd_death_cross": {"enabled": False},
-            "kdj": {"enabled": False, "min": 10, "max": 90},
-            "kdj_low_cross": {"enabled": False, "threshold": 30},
-            "bb_position": {"enabled": False, "position": "lower"},
-            "ma_trend": {"enabled": False, "type": "bullish"},
-            "price_vs_ma20": {"enabled": False, "relation": "above", "pct": 2.0},
-            "price_vs_ma60": {"enabled": False, "relation": "above", "pct": 5.0},
-            "atr_ratio": {"enabled": False, "min": 0.5},
-            "high_low_ratio": {"enabled": False, "min": 0.8},
-            "avg_amplitude_120": {"enabled": False, "min": 7.0},
-            "avg_turnover_120": {"enabled": False, "min": 2.0},
-        },
-        "signal_weights": {
-            "macd_golden": 2.0,
-            "rsi_oversold": 1.5,
-            "kdj_cross": 1.2,
-            "volume": 0.8,
-        },
-        "lookback_days": 120,
-    }
-
-
-def save_picker_config(cfg: dict):
-    """同时写入 JSON 文件和数据库（双重保障）。"""
-    # 写文件
-    try:
-        with open(_STOCK_PICKER_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-    # 写数据库
-    try:
-        db_manager.save_config("stock_picker", cfg, "选股配置")
-    except Exception:
-        pass
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# 核心选股函数 - 按配置筛选股票
+# 核心选股函数
 # ─────────────────────────────────────────────────────────────────────────
 
 def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
@@ -189,11 +77,15 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
     _need_history = (
         config["filters"].get("prior_rally", {}).get("enabled", False)
         or config["filters"].get("volume_selloff", {}).get("enabled", False)
+        or config["filters"].get("consecutive_volume_surge", {}).get("enabled", False)
     )
     if _need_history:
         hist_days = max(
             config["filters"].get("prior_rally", {}).get("lookback_days",
                 config.get("lookback_days", 60)),
+            config["filters"].get("consecutive_volume_surge", {}).get("avg_window", 20)
+                + config["filters"].get("consecutive_volume_surge", {}).get("consecutive_days", 5)
+                + 10,
             30,
         )
         _history_cache = db_manager.load_stock_history_batch(codes, hist_days + 5)
@@ -487,6 +379,40 @@ def pick_stocks(pool: list[str] | None, config: dict) -> list[dict]:
             # if no history, skip (don't fail — insufficient data)
         if code in _peak_info:
             del _peak_info[code]
+        # 23 连续放量检测 — 在回溯期内是否存在连续N日放量
+        if _chk("consecutive_volume_surge"):
+            cfg = config["filters"]["consecutive_volume_surge"]
+            n_days = cfg.get("consecutive_days", 5)
+            min_ratio = cfg.get("min_volume_ratio", 1.5)
+            avg_win = cfg.get("avg_window", 20)
+            lookback_days = config.get("lookback_days", 60)
+
+            hist = _history_cache.get(code, [])
+            # only examine the most recent `lookback_days` (plus avg_win for baseline)
+            search_window = min(lookback_days + avg_win, len(hist))
+            recent = hist[-search_window:] if search_window < len(hist) else hist
+            if recent and len(recent) >= avg_win + n_days:
+                found_surge = False
+                for i in range(avg_win, len(recent) - n_days + 1):
+                    pre_vols = [float(recent[j].get("volume", 0) or 0) for j in range(i - avg_win, i)]
+                    avg_vol = sum(pre_vols) / avg_win if pre_vols else 0
+                    if avg_vol <= 0:
+                        continue
+                    all_surge = True
+                    for j in range(i, i + n_days):
+                        day_vol = float(recent[j].get("volume", 0) or 0)
+                        if day_vol <= avg_vol * min_ratio:
+                            all_surge = False
+                            break
+                    if all_surge:
+                        found_surge = True
+                        break
+                if not found_surge:
+                    passed = False
+                else:
+                    scores["consecutive_vol"] = min_ratio
+            else:
+                passed = False  # insufficient history
 
         if not passed:
             continue
@@ -593,53 +519,17 @@ def make_picker_table(candidates: list[dict]) -> Table:
 
 
 def menu_stock_picker():
-    """选股工具交互菜单 - 支持预设筛选条件"""
-    console.print("\n[bold cyan]=== 选股工具 ===[/]")
+    """选股工具 — 放量后缩量回调"""
+    console.print("\n[bold cyan]=== 选股工具: 放量后缩量回调 ===[/]")
 
-    # 检查本地缓存状态
     cached_count = len(get_cached_stock_codes())
     if cached_count == 0:
         console.print("[red]本地无缓存数据！请先按 [bold]c[/bold] 进入缓存管理下载历史数据。[/]")
         Prompt.ask("\n按 Enter 返回")
         return
 
-    # 从文件读取预设条件（文件优先，DB 回退）
-    preset_configs = load_preset_filters()
-
-    # 显示预设列表
-    config = None
-    if preset_configs:
-        console.print("[cyan]可用的预设筛选条件:[/]")
-        for key, info in preset_configs.items():
-            console.print(f"  [{key}] {info['name']}")
-        console.print("  [0] 使用默认配置")
-        console.print("  [q] 返回")
-        choice = Prompt.ask("\n选择筛选条件", default="0", show_choices=False)
-        if choice == "q":
-            return
-        elif choice in preset_configs:
-            config = preset_configs[choice]["config"]
-            console.print(f"[green]已选择: {preset_configs[choice]['name']}[/]")
-        else:
-            config = load_picker_config()
-    else:
-        config = load_picker_config()
-
-    # 确定股票池
-    if config.get("pool"):
-        pool = config["pool"]
-        pool_desc = f"配置指定 ({len(pool)} 只)"
-    else:
-        pool = None  # pick_stocks 内部会自动取全部缓存股票
-        pool_desc = f"全部缓存A股 ({cached_count} 只)"
-
-    # 显示配置摘要
-    enabled_filters = [k for k, v in config["filters"].items() if v.get("enabled", False)]
-    console.print(f"\n[dim]股票池: {pool_desc}[/]")
-    if enabled_filters:
-        console.print(f"[dim]启用筛选: {', '.join(enabled_filters)}[/]")
-    else:
-        console.print("[dim]启用筛选: 基础条件 (换手率、振幅、涨幅、价格)[/]")
+    console.print(f"[dim]股票池: 全部缓存A股 ({cached_count} 只)[/]")
+    console.print("[dim]策略: 阶段放量(连续5日>1.5×20日均量) → 当前缩量(≤5日均量)[/]")
 
     lookback = Prompt.ask(
         "\n[dim]回溯交易日数[/]",
@@ -648,23 +538,41 @@ def menu_stock_picker():
     )
     try:
         lookback = int(lookback)
-        lookback = max(lookback, 10)  # minimum 10 trading days
+        lookback = max(lookback, 10)
     except ValueError:
-        lookback = 120
-    config["lookback_days"] = lookback
+        lookback = 60
 
-    choice = Prompt.ask(
-        "\n[dim](s)开始选股 (q)返回[/]",
-        choices=["s", "q"], default="s", show_choices=False,
-    )
-    if choice == "q":
-        return
+    # 构建核心筛选配置
+    config = {
+        "filters": {
+            "turnover": {"min": 0.5, "max": 30.0, "enabled": True},
+            "amplitude": {"min": 0.5, "max": 15.0, "enabled": True},
+            "price_range": {"min": 5, "max": 500, "enabled": True},
+            "volume_rate": {
+                "enabled": True,
+                "min_vs_avg": 0.1,
+                "max_vs_avg": 1.0,
+                "days": 5,
+            },
+            "consecutive_volume_surge": {
+                "enabled": True,
+                "consecutive_days": 5,
+                "min_volume_ratio": 1.5,
+                "avg_window": 20,
+            },
+        },
+        "signal_weights": {
+            "consecutive_vol": 2.0,
+            "volume": 0.5,
+        },
+        "lookback_days": lookback,
+    }
 
     console.print(f"\n[dim]正在筛选 {cached_count} 只股票 ({lookback}日回溯)...[/]")
-    candidates = pick_stocks(pool, config)
+    candidates = pick_stocks(None, config)
 
     if not candidates:
-        console.print("[yellow]未找到符合条件的股票，可以尝试放宽筛选条件[/]")
+        console.print("[yellow]未找到符合条件的股票，可以尝试增加回溯天数[/]")
     else:
         console.print(make_picker_table(candidates))
         console.print(f"\n[green]共找到 {len(candidates)} 只符合条件的股票[/]")
