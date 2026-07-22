@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from rich.console import Console
+from rich.live import Live
 from rich.prompt import Prompt, Confirm
 from rich.progress import (
     Progress, SpinnerColumn, BarColumn,
@@ -211,14 +212,14 @@ def menu_stock_detail():
 
         total_days = len(rows)
         days_str = Prompt.ask(
-            f"查看最近多少个交易日 (默认120, 最多{total_days})",
-            default="120", show_default=True,
+            f"查看最近多少个交易日 (默认30, 最多{total_days})",
+            default="30", show_default=True,
         )
         try:
-            days = int(days_str) if days_str else 120
+            days = int(days_str) if days_str else 30
             days = max(min(days, total_days), 5)
         except ValueError:
-            days = 120
+            days = 30
 
         # Compute indicators and get latest signals
         rows_with_ind = add_indicators(rows)
@@ -243,12 +244,45 @@ def menu_stock_detail():
             }
             display_rows.insert(0, rt_row)
 
-        console.print(make_history_table(display_rows, code, name))
+        # 实时监控模式
+        if Confirm.ask("\n开启实时监控?", default=False):
+            import time
 
-        if signals:
-            console.print("\n[bold yellow]技术信号:[/]")
-            for s in signals:
-                console.print(f"  • {s}")
+            def _build():
+                return make_history_table(display_rows, code, name)
+
+            with Live(_build(), refresh_per_second=4, console=console) as live:
+                if signals:
+                    console.print("\n[bold yellow]技术信号:[/]")
+                    for s in signals:
+                        console.print(f"  • {s}")
+
+                try:
+                    while True:
+                        time.sleep(3)
+                        rt = fetch_realtime_quotes([code])
+                        if rt and rt[0].get("name"):
+                            r = rt[0]
+                            display_rows[0] = {
+                                "date": datetime.today().strftime("%Y-%m-%d"),
+                                "open": r.get("open"),
+                                "high": r.get("high"),
+                                "low": r.get("low"),
+                                "close": r.get("close"),
+                                "pct_chg": r.get("pctChg"),
+                                "volume": r.get("volume"),
+                                "amount": r.get("amount"),
+                                "turn": 0,
+                            }
+                        live.update(_build())
+                except KeyboardInterrupt:
+                    pass
+        else:
+            console.print(make_history_table(display_rows, code, name))
+            if signals:
+                console.print("\n[bold yellow]技术信号:[/]")
+                for s in signals:
+                    console.print(f"  • {s}")
 
         console.print()
 

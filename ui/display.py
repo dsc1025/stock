@@ -80,20 +80,22 @@ def make_history_table(rows: list[dict], code: str, name: str) -> Table:
     t.add_column("成交额", justify="right", width=10)
     t.add_column("换手", justify="right", width=7)
 
-    for r in rows:
+    for i, r in enumerate(rows):
         pct = r.get("pct_chg", 0) or 0
         vol = r.get("volume", 0) or 0
         amt = r.get("amount", 0) or 0
+        first = i == 0 and len(rows) > 1
+        b, be = ("[bold]", "[/]") if first else ("", "")
         t.add_row(
-            str(r.get("date", "")),
-            f"¥{r.get('open', 0) or 0:.2f}",
-            f"¥{r.get('high', 0) or 0:.2f}",
-            f"¥{r.get('low', 0) or 0:.2f}",
-            f"¥{r.get('close', 0) or 0:.2f}",
-            Text.from_markup(color_pct(pct)),
-            f"{int(vol / 100):,}",
-            f"{amt / 100000000:.2f}亿",
-            f"{r.get('turn', 0) or 0:.1f}%",
+            f"{b}{str(r.get('date', ''))}{be}",
+            f"{b}¥{r.get('open', 0) or 0:.2f}{be}",
+            f"{b}¥{r.get('high', 0) or 0:.2f}{be}",
+            f"{b}¥{r.get('low', 0) or 0:.2f}{be}",
+            f"{b}¥{r.get('close', 0) or 0:.2f}{be}",
+            Text.from_markup(f"{b}{color_pct(pct)}{be}" if first else color_pct(pct)),
+            f"{b}{int(vol / 100):,}{be}",
+            f"{b}{amt / 100000000:.2f}亿{be}",
+            f"{b}{r.get('turn', 0) or 0:.1f}%{be}",
         )
 
     return t
