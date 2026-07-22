@@ -45,20 +45,9 @@ def make_picker_table(candidates: list[dict]) -> Table:
     t.add_column("成交量", justify="right", width=10)
     t.add_column("换手", justify="right", width=7)
     t.add_column("振幅", justify="right", width=7)
-    t.add_column("RSI", justify="right", width=5)
-    t.add_column("K值", justify="right", width=5)
-    t.add_column("MACD", justify="center", width=5)
-    t.add_column("MA20", justify="center", width=5)
-    t.add_column("MA60", justify="center", width=5)
-    t.add_column("均振幅", justify="right", width=10)
-    t.add_column("均换手", justify="right", width=10)
     t.add_column("评分", justify="right", width=7)
 
     for c in candidates:
-        macd_mark = "✓" if c["macd_positive"] else "✗"
-        ma20_mark = "↑" if c["price_above_ma20"] else "↓"
-        ma60_mark = "↑" if c["price_above_ma60"] else "↓"
-
         t.add_row(
             _strip_prefix(c["code"]),
             c["name"],
@@ -67,13 +56,6 @@ def make_picker_table(candidates: list[dict]) -> Table:
             f"{int(c.get('volume', 0) / 100):,}",
             f"{c['turnover']:.1f}%",
             f"{c['amplitude']:.1f}%",
-            f"{c['rsi']:.0f}",
-            f"{c['k']:.0f}",
-            macd_mark,
-            ma20_mark,
-            ma60_mark,
-            f"{c.get('avg_amplitude_120', 0):.1f}%",
-            f"{c.get('avg_turnover_120', 0):.1f}%",
             f"{c['score']:.1f}",
         )
 
