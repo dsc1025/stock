@@ -14,6 +14,7 @@ Controls:
   [c] cache manager     [q] quit
 """
 from __future__ import annotations
+from datetime import datetime
 
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
@@ -23,7 +24,7 @@ from rich.progress import (
 )
 
 from db_schema import init_tables
-from services.data_fetcher import login, logout
+from services.data_fetcher import login, logout, fetch_realtime_quotes
 from services import data_sync
 from repository import stock_repo
 from indicators import add_indicators, generate_signals
@@ -224,6 +225,24 @@ def menu_stock_detail():
         signals = generate_signals(rows_with_ind)
 
         display_rows = rows[-days:][::-1]  # most recent first
+
+        # Prepend real-time quote as first row
+        rt = fetch_realtime_quotes([code])
+        if rt and rt[0].get("name"):
+            r = rt[0]
+            rt_row = {
+                "date": datetime.today().strftime("%Y-%m-%d"),
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "pct_chg": r.get("pctChg"),
+                "volume": r.get("volume"),
+                "amount": r.get("amount"),
+                "turn": 0,
+            }
+            display_rows.insert(0, rt_row)
+
         console.print(make_history_table(display_rows, code, name))
 
         if signals:
