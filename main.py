@@ -74,13 +74,23 @@ def menu_stock_picker():
     except ValueError:
         vol_mul = 3.0
 
+    turn_min = Prompt.ask(
+        "[dim]锚点最低换手率 (%)[/]", default="25", show_default=True,
+    )
+    try:
+        turn_min = float(turn_min)
+        turn_min = max(turn_min, 0)
+    except ValueError:
+        turn_min = 25.0
+
     config = {
         "lookback_days": lookback,
         "volume_ratio": vol_mul,
+        "min_turnover": turn_min,
     }
 
     console.print(
-        f"\n[dim]参数: N={lookback}日  放量≥{vol_mul}×  锚点+2天持续[/]"
+        f"\n[dim]参数: N={lookback}日  放量≥{vol_mul}×  换手≥{turn_min}%  锚点+2天持续[/]"
     )
     console.print(f"[dim]正在筛选 {cached_count} 只股票...[/]")
 
@@ -216,14 +226,14 @@ def menu_stock_detail():
 
         total_days = len(rows)
         days_str = Prompt.ask(
-            f"查看最近多少个交易日 (默认30, 最多{total_days})",
-            default="30", show_default=True,
+            f"查看最近多少个交易日 (默认120, 最多{total_days})",
+            default="120", show_default=True,
         )
         try:
-            days = int(days_str) if days_str else 30
+            days = int(days_str) if days_str else 120
             days = max(min(days, total_days), 5)
         except ValueError:
-            days = 30
+            days = 120
 
         # Compute indicators and get latest signals
         rows_with_ind = add_indicators(rows)

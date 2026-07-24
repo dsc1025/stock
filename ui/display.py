@@ -43,10 +43,9 @@ def make_picker_table(candidates: list[dict]) -> Table:
     t.add_column("价格", justify="right", width=8)
     t.add_column("涨幅", justify="right", width=7)
     t.add_column("量比", justify="right", width=7)
-    t.add_column("放量日", justify="right", width=11)
     t.add_column("成交量", justify="right", width=10)
     t.add_column("换手", justify="right", width=7)
-    t.add_column("振幅", justify="right", width=7)
+    t.add_column("放量日", justify="right", width=11)
 
     for c in candidates:
         t.add_row(
@@ -55,10 +54,9 @@ def make_picker_table(candidates: list[dict]) -> Table:
             f"¥{c['price']:.2f}",
             Text.from_markup(color_pct(c["pct_change"])),
             f"{c['vol_ratio']:.1f}×",
-            c.get("anchor_date", "?"),
             f"{int(c.get('volume', 0) / 100):,}",
             f"{c['turnover']:.1f}%",
-            f"{c['amplitude']:.1f}%",
+            c.get("anchor_date", "?"),
         )
 
     return t

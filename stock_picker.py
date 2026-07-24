@@ -27,6 +27,7 @@ def pick_stocks(config: dict) -> list[dict]:
     """
     n = config.get("lookback_days", 120)
     volume_ratio = config.get("volume_ratio", 2.0)
+    min_turnover = config.get("min_turnover", 25.0)
 
     # ── Load all stock IDs and metadata ──
     all_stocks = stock_repo.get_all_stock_ids()
@@ -66,6 +67,11 @@ def pick_stocks(config: dict) -> list[dict]:
             # ── Step 2: find anchor = highest-volume day ──
             anchor_idx = max(range(len(vols)), key=lambda i: vols[i])
             anchor_vol = vols[anchor_idx]
+
+            # ── Step 2b: anchor turnover ≥ threshold ──
+            anchor_turn = float(recent[anchor_idx].get("turn", 0) or 0)
+            if anchor_turn < min_turnover:
+                continue
 
             # ── Step 3: need anchor+2 within N days (3-day window) ──
             if anchor_idx + 2 >= n:
