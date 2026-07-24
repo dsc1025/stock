@@ -32,7 +32,7 @@ def auto_prefix(num: str) -> str:
 def make_picker_table(candidates: list[dict]) -> Table:
     """Render stock picker results as a Rich table."""
     t = Table(
-        title="[bold cyan]选股结果[/]",
+        title="[bold cyan]选股结果 — 量峰持续放量[/]",
         box=box.SIMPLE_HEAVY,
         header_style="bold magenta",
         show_lines=False,
@@ -42,10 +42,11 @@ def make_picker_table(candidates: list[dict]) -> Table:
     t.add_column("名称", width=14)
     t.add_column("价格", justify="right", width=8)
     t.add_column("涨幅", justify="right", width=7)
+    t.add_column("量比", justify="right", width=7)
+    t.add_column("放量日", justify="right", width=11)
     t.add_column("成交量", justify="right", width=10)
     t.add_column("换手", justify="right", width=7)
     t.add_column("振幅", justify="right", width=7)
-    t.add_column("评分", justify="right", width=7)
 
     for c in candidates:
         t.add_row(
@@ -53,10 +54,11 @@ def make_picker_table(candidates: list[dict]) -> Table:
             c["name"],
             f"¥{c['price']:.2f}",
             Text.from_markup(color_pct(c["pct_change"])),
+            f"{c['vol_ratio']:.1f}×",
+            c.get("anchor_date", "?"),
             f"{int(c.get('volume', 0) / 100):,}",
             f"{c['turnover']:.1f}%",
             f"{c['amplitude']:.1f}%",
-            f"{c['score']:.1f}",
         )
 
     return t

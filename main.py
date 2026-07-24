@@ -43,8 +43,8 @@ console = Console()
 # ─────────────────────────────────────────────────────────────────────────
 
 def menu_stock_picker():
-    """Stock selection tool — local database only, no live API."""
-    console.print("\n[bold cyan]=== 选股工具: 放量后缩量回调 ===[/]")
+    """Stock selection — anchor-low + surrounding volume surge model."""
+    console.print("\n[bold cyan]=== 选股工具: 量峰持续放量 ===[/]")
 
     cached_count = stock_repo.get_cached_count()
     if cached_count == 0:
@@ -53,39 +53,43 @@ def menu_stock_picker():
         return
 
     console.print(f"[dim]股票池: 全部缓存股 ({cached_count} 只有数据)[/]")
-    console.print("[dim]策略: 阶段放量(连续5日>1.5×20日均量) → 当前缩量(≤5日均量)[/]")
+    console.print("[dim]策略: N日历史(不含今天)成交量最高日为锚点 → 锚点+2天持续放量[/]")
 
+    # ── User input ──
     lookback = Prompt.ask(
-        "\n[dim]回溯交易日数[/]", default="60", show_default=True,
+        "\n[dim]回溯交易日数 N[/]", default="120", show_default=True,
     )
     try:
         lookback = int(lookback)
         lookback = max(lookback, 10)
     except ValueError:
-        lookback = 60
+        lookback = 120
+
+    vol_mul = Prompt.ask(
+        "[dim]放量倍数 (锚点窗口量 / N日均量)[/]", default="3.0", show_default=True,
+    )
+    try:
+        vol_mul = float(vol_mul)
+        vol_mul = max(vol_mul, 1.0)
+    except ValueError:
+        vol_mul = 3.0
 
     config = {
-        "filters": {
-            "turnover": {"min": 0.5, "max": 30.0, "enabled": True},
-            "amplitude": {"min": 0.5, "max": 15.0, "enabled": True},
-            "price_range": {"min": 5, "max": 500, "enabled": True},
-            "volume_rate": {
-                "enabled": True, "min_vs_avg": 0.1, "max_vs_avg": 1.0, "days": 5,
-            },
-            "consecutive_volume_surge": {
-                "enabled": True, "consecutive_days": 5,
-                "min_volume_ratio": 1.5, "avg_window": 20,
-            },
-        },
-        "signal_weights": {"consecutive_vol": 2.0, "volume": 0.5},
         "lookback_days": lookback,
+        "volume_ratio": vol_mul,
     }
 
-    console.print(f"\n[dim]正在筛选 {cached_count} 只股票 ({lookback}日回溯)...[/]")
-    candidates = pick_stocks(None, config)
+    console.print(
+        f"\n[dim]参数: N={lookback}日  放量≥{vol_mul}×  锚点+2天持续[/]"
+    )
+    console.print(f"[dim]正在筛选 {cached_count} 只股票...[/]")
+
+    candidates = pick_stocks(config)
 
     if not candidates:
-        console.print("[yellow]未找到符合条件的股票，可以尝试增加回溯天数[/]")
+        console.print(
+            "[yellow]未找到符合条件的股票，可以尝试降低放量倍数[/]"
+        )
     else:
         console.print(make_picker_table(candidates))
         console.print(f"\n[green]共找到 {len(candidates)} 只符合条件的股票[/]")
